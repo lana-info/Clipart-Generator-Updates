@@ -28,3 +28,12 @@ dist/
 
 # Временные файлы документации
 doc_*.html
+
+# Резервные копии
+main_restored.py
+
+# Папка релизных артефактов
+release/*.exe
+release/*.msi
+
+

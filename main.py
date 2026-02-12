@@ -3,6 +3,8 @@ import os
 import json
 import time
 import uuid
+import tempfile
+import hashlib
 import mimetypes
 from urllib.parse import urlparse
 from urllib import error as urlerror
@@ -10,7 +12,7 @@ from urllib import request, parse
 from datetime import datetime
 from PIL import Image
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -35,6 +37,8 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QLineEdit,
 )
+
+APP_VERSION = "0.1.0"
 
 
 class WorkerThread(QThread):
@@ -643,6 +647,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Clipart Generator")
         self.resize(980, 780)
+        self.pendingUpdateInstallerPath = ""
 
         self.work_dir = ""
         self.worker = None
@@ -651,12 +656,17 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
+        if self.config.get("auto_update_check", True):
+            QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
 
     def load_config(self):
         default_config = {
             "retries": 3,
             "timeout": 60,
             "generation_wait_timeout": 300,
+            "app_version": APP_VERSION,
+            "auto_update_check": True,
+            "update_manifest_url": "https://raw.githubusercontent.com/lana-info/Clipart-Generator/main/version.json",
             "kie_api_key": "",
             "remember_api_key": True,
             "kie_upload_path": "clipart-generator",
@@ -944,6 +954,23 @@ class MainWindow(QMainWindow):
         process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 3, 2)
         process_settings_group.setLayout(process_settings_layout)
         settings_tab_layout.addWidget(process_settings_group)
+
+        update_group = QGroupBox("Обновления приложения")
+        update_layout = QGridLayout()
+        self.chk_auto_update = QCheckBox("Автоматически проверять обновления при запуске")
+        self.chk_auto_update.setChecked(bool(self.config.get("auto_update_check", True)))
+        self.update_manifest_url_input = QLineEdit(str(self.config.get("update_manifest_url", "")).strip())
+        self.btn_check_updates = QPushButton("Проверить обновления")
+        self.btn_check_updates.setMinimumHeight(34)
+        self.btn_check_updates.setStyleSheet(self.primary_button_style)
+        self.btn_check_updates.clicked.connect(lambda: self.check_for_updates(silent=False))
+
+        update_layout.addWidget(self.chk_auto_update, 0, 0, 1, 3)
+        update_layout.addWidget(QLabel("URL version.json:"), 1, 0)
+        update_layout.addWidget(self.update_manifest_url_input, 1, 1)
+        update_layout.addWidget(self.btn_check_updates, 1, 2)
+        update_group.setLayout(update_layout)
+        settings_tab_layout.addWidget(update_group)
         settings_tab_layout.addStretch()
 
         log_group = QGroupBox("Лог и прогресс")
@@ -1076,6 +1103,8 @@ class MainWindow(QMainWindow):
         self.config["upscale_target_size"] = self.upscale_target_size_input.text().strip()
         self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
         self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
+        self.config["auto_update_check"] = self.chk_auto_update.isChecked()
+        self.config["update_manifest_url"] = self.update_manifest_url_input.text().strip()
         if self.radio_run_process.isChecked():
             self.config["run_mode"] = "process_only"
         elif self.radio_run_both.isChecked():
@@ -1238,6 +1267,120 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"Проверка модели '{raw_model}' не пройдена: {e}")
             QMessageBox.warning(self, "Проверка модели", f"Ошибка проверки: {e}")
+
+    def _parse_version_tuple(self, version_text):
+        parts = str(version_text or "0.0.0").strip().split(".")
+        numbers = []
+        for part in parts:
+            try:
+                numbers.append(int(part))
+            except Exception:
+                numbers.append(0)
+        while len(numbers) < 3:
+            numbers.append(0)
+        return tuple(numbers[:3])
+
+    def _is_newer_version(self, latest, current):
+        return self._parse_version_tuple(latest) > self._parse_version_tuple(current)
+
+    def _sha256_file(self, file_path):
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest().lower()
+
+    def _download_update_installer(self, download_url, expected_sha256=None):
+        req = request.Request(
+            download_url,
+            headers={
+                "User-Agent": "ClipartGenerator-Updater/1.0",
+                "Accept": "application/octet-stream,*/*",
+            },
+            method="GET",
+        )
+        with request.urlopen(req, timeout=120) as resp:
+            content = resp.read()
+
+        temp_dir = tempfile.gettempdir()
+        filename = f"ClipartGenerator-Update-{int(time.time())}.exe"
+        installer_path = os.path.join(temp_dir, filename)
+        with open(installer_path, "wb") as f:
+            f.write(content)
+
+        if expected_sha256:
+            actual = self._sha256_file(installer_path)
+            if actual != expected_sha256.lower().strip():
+                try:
+                    os.remove(installer_path)
+                except Exception:
+                    pass
+                raise RuntimeError("Контрольная сумма обновления не совпала")
+
+        return installer_path
+
+    def _run_downloaded_installer(self, installer_path):
+        if not os.path.isfile(installer_path):
+            raise RuntimeError("Файл установщика не найден")
+        os.startfile(installer_path)
+
+    def check_for_updates(self, silent=False):
+        manifest_url = str(self.config.get("update_manifest_url", "")).strip()
+        if not manifest_url:
+            if not silent:
+                QMessageBox.warning(self, "Обновления", "Не задан URL version.json")
+            return
+
+        try:
+            req = request.Request(
+                manifest_url,
+                headers={
+                    "User-Agent": "ClipartGenerator-Updater/1.0",
+                    "Accept": "application/json",
+                },
+                method="GET",
+            )
+            with request.urlopen(req, timeout=20) as resp:
+                manifest = json.loads(resp.read().decode("utf-8"))
+
+            latest_version = str(manifest.get("latest_version", "")).strip()
+            download_url = str(manifest.get("download_url", "")).strip()
+            checksum = str(manifest.get("sha256", "")).strip()
+
+            if not latest_version or not download_url:
+                raise RuntimeError("version.json не содержит latest_version/download_url")
+
+            current_version = str(self.config.get("app_version", APP_VERSION)).strip()
+            if not self._is_newer_version(latest_version, current_version):
+                if not silent:
+                    QMessageBox.information(self, "Обновления", f"У вас актуальная версия: {current_version}")
+                return
+
+            answer = QMessageBox.question(
+                self,
+                "Доступно обновление",
+                (
+                    f"Доступна новая версия: {latest_version}\n"
+                    f"Текущая версия: {current_version}\n\n"
+                    "Скачать и запустить установщик обновления сейчас?"
+                ),
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+            self.log(f"Скачивание обновления {latest_version}...")
+            installer_path = self._download_update_installer(download_url, expected_sha256=checksum or None)
+            self.log(f"Установщик скачан: {installer_path}")
+            self._run_downloaded_installer(installer_path)
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Установщик обновления запущен. После завершения установки перезапустите приложение.",
+            )
+        except Exception as e:
+            self.log(f"Проверка обновлений: {e}")
+            if not silent:
+                QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {e}")
 
     def _ratio_to_legacy_size_ui(self, ratio):
         return {
