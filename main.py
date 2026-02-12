@@ -11,6 +11,7 @@ from urllib import error as urlerror
 from urllib import request, parse
 from datetime import datetime
 from PIL import Image
+from license_client import LicenseClient
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
@@ -648,6 +649,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Clipart Generator")
         self.resize(980, 780)
         self.pendingUpdateInstallerPath = ""
+        self.licenseClient = None
 
         self.work_dir = ""
         self.worker = None
@@ -656,6 +658,7 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
+        self.init_license_client()
         if self.config.get("auto_update_check", True):
             QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
 
@@ -678,6 +681,9 @@ class MainWindow(QMainWindow):
             "upscale_target_size": "",
             "kie_upscale_model": "topaz/upscale",
             "kie_remove_bg_model": "recraft/remove-background",
+            "license_server_url": "http://127.0.0.1:8000",
+            "license_key": "",
+            "license_enforce": False,
             "run_mode": "generate_only",
         }
         if os.path.exists("config.json"):
@@ -971,6 +977,36 @@ class MainWindow(QMainWindow):
         update_layout.addWidget(self.btn_check_updates, 1, 2)
         update_group.setLayout(update_layout)
         settings_tab_layout.addWidget(update_group)
+
+        license_group = QGroupBox("Лицензия")
+        license_layout = QGridLayout()
+        self.license_server_url_input = QLineEdit(str(self.config.get("license_server_url", "http://127.0.0.1:8000")))
+        self.license_key_input = QLineEdit(str(self.config.get("license_key", "")))
+        self.license_enforce_chk = QCheckBox("Требовать лицензию перед запуском")
+        self.license_enforce_chk.setChecked(bool(self.config.get("license_enforce", False)))
+        self.license_status_label = QLabel("Статус лицензии: не проверено")
+
+        self.btn_license_activate = QPushButton("Активировать")
+        self.btn_license_activate.setStyleSheet(self.primary_button_style)
+        self.btn_license_activate.clicked.connect(self.activate_license)
+        self.btn_license_check = QPushButton("Проверить")
+        self.btn_license_check.setStyleSheet(self.primary_button_style)
+        self.btn_license_check.clicked.connect(self.validate_license_manual)
+        self.btn_license_deactivate = QPushButton("Деактивировать")
+        self.btn_license_deactivate.setStyleSheet(self.primary_button_style)
+        self.btn_license_deactivate.clicked.connect(self.deactivate_license)
+
+        license_layout.addWidget(QLabel("URL сервера лицензий:"), 0, 0)
+        license_layout.addWidget(self.license_server_url_input, 0, 1, 1, 2)
+        license_layout.addWidget(QLabel("Лицензионный ключ:"), 1, 0)
+        license_layout.addWidget(self.license_key_input, 1, 1, 1, 2)
+        license_layout.addWidget(self.license_enforce_chk, 2, 0, 1, 3)
+        license_layout.addWidget(self.btn_license_activate, 3, 0)
+        license_layout.addWidget(self.btn_license_check, 3, 1)
+        license_layout.addWidget(self.btn_license_deactivate, 3, 2)
+        license_layout.addWidget(self.license_status_label, 4, 0, 1, 3)
+        license_group.setLayout(license_layout)
+        settings_tab_layout.addWidget(license_group)
         settings_tab_layout.addStretch()
 
         log_group = QGroupBox("Лог и прогресс")
@@ -1105,6 +1141,9 @@ class MainWindow(QMainWindow):
         self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
         self.config["auto_update_check"] = self.chk_auto_update.isChecked()
         self.config["update_manifest_url"] = self.update_manifest_url_input.text().strip()
+        self.config["license_server_url"] = self.license_server_url_input.text().strip()
+        self.config["license_key"] = self.license_key_input.text().strip()
+        self.config["license_enforce"] = self.license_enforce_chk.isChecked()
         if self.radio_run_process.isChecked():
             self.config["run_mode"] = "process_only"
         elif self.radio_run_both.isChecked():
@@ -1112,6 +1151,11 @@ class MainWindow(QMainWindow):
         else:
             self.config["run_mode"] = "generate_only"
         self.save_config()
+
+        self.init_license_client()
+        if self.config.get("license_enforce", False):
+            if not self.validate_license_before_start():
+                return
 
         if not current_api_key:
             QMessageBox.warning(self, "Ошибка", "Укажите KIE API Key на вкладке «Настройки»")
@@ -1381,6 +1425,83 @@ class MainWindow(QMainWindow):
             self.log(f"Проверка обновлений: {e}")
             if not silent:
                 QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {e}")
+
+    def init_license_client(self):
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, "license_cache.json")
+        self.licenseClient = LicenseClient(
+            server_url=str(self.config.get("license_server_url", "")).strip(),
+            cache_path=cache_path,
+            app_version=APP_VERSION,
+            timeout=max(5, int(self.config.get("timeout", 60))),
+        )
+
+    def activate_license(self):
+        key = self.license_key_input.text().strip()
+        self.config["license_key"] = key
+        self.config["license_server_url"] = self.license_server_url_input.text().strip()
+        self.save_config()
+        self.init_license_client()
+        try:
+            result = self.licenseClient.activate(key)
+            if result.get("ok"):
+                self.license_status_label.setText("Статус лицензии: активна")
+                self.log("Лицензия активирована")
+                QMessageBox.information(self, "Лицензия", result.get("message", "Активация успешна"))
+            else:
+                self.license_status_label.setText("Статус лицензии: ошибка активации")
+                QMessageBox.warning(self, "Лицензия", result.get("message", "Ошибка активации"))
+        except Exception as e:
+            self.license_status_label.setText("Статус лицензии: ошибка подключения")
+            QMessageBox.warning(self, "Лицензия", f"Ошибка активации: {e}")
+
+    def validate_license_manual(self):
+        ok = self.validate_license_before_start(show_success=True)
+        if ok:
+            self.license_status_label.setText("Статус лицензии: валидна")
+
+    def deactivate_license(self):
+        key = self.license_key_input.text().strip()
+        self.config["license_key"] = key
+        self.config["license_server_url"] = self.license_server_url_input.text().strip()
+        self.save_config()
+        self.init_license_client()
+        try:
+            result = self.licenseClient.deactivate(key)
+            if result.get("ok"):
+                self.license_status_label.setText("Статус лицензии: деактивирована")
+                self.log("Лицензия деактивирована")
+                QMessageBox.information(self, "Лицензия", result.get("message", "Деактивация успешна"))
+            else:
+                QMessageBox.warning(self, "Лицензия", result.get("message", "Ошибка деактивации"))
+        except Exception as e:
+            QMessageBox.warning(self, "Лицензия", f"Ошибка деактивации: {e}")
+
+    def validate_license_before_start(self, show_success=False):
+        key = self.license_key_input.text().strip()
+        if not key:
+            QMessageBox.warning(self, "Лицензия", "Введите лицензионный ключ")
+            return False
+
+        self.config["license_key"] = key
+        self.config["license_server_url"] = self.license_server_url_input.text().strip()
+        self.save_config()
+        self.init_license_client()
+
+        result = self.licenseClient.validate(key, use_offline=True)
+        if result.get("ok"):
+            message = result.get("message", "Лицензия валидна")
+            if result.get("offline"):
+                message = f"{message} (офлайн-кеш)"
+            self.log(message)
+            if show_success:
+                QMessageBox.information(self, "Лицензия", message)
+            return True
+
+        self.license_status_label.setText("Статус лицензии: недействительна")
+        QMessageBox.warning(self, "Лицензия", result.get("message", "Проверка лицензии не пройдена"))
+        return False
 
     def _ratio_to_legacy_size_ui(self, ratio):
         return {
