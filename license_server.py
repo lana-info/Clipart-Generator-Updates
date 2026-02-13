@@ -1,7 +1,9 @@
+import random
 import sqlite3
-from datetime import datetime, timezone
+import string
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 DB_PATH = "licenses.db"
@@ -14,6 +16,15 @@ class LicensePayload(BaseModel):
     app_version: str | None = None
 
 
+class GeneratePayload(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    prefix: str = "CG"
+    mode: str = "random"  # random | serial
+    expires_days: int = Field(default=365, ge=1, le=3650)
+    max_devices: int = Field(default=1, ge=1, le=20)
+    serial_start: int = Field(default=1, ge=1)
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -22,11 +33,35 @@ def init_db():
         CREATE TABLE IF NOT EXISTS licenses (
             license_key TEXT PRIMARY KEY,
             is_active INTEGER NOT NULL DEFAULT 1,
-            bound_device TEXT,
+            expires_at TEXT,
+            max_devices INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT,
             updated_at TEXT
         )
         """
     )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            license_key TEXT NOT NULL,
+            device_fingerprint TEXT NOT NULL,
+            activated_at TEXT,
+            UNIQUE(license_key, device_fingerprint)
+        )
+        """
+    )
+
+    cur.execute("PRAGMA table_info(licenses)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "expires_at" not in columns:
+        cur.execute("ALTER TABLE licenses ADD COLUMN expires_at TEXT")
+    if "max_devices" not in columns:
+        cur.execute("ALTER TABLE licenses ADD COLUMN max_devices INTEGER NOT NULL DEFAULT 1")
+    if "created_at" not in columns:
+        cur.execute("ALTER TABLE licenses ADD COLUMN created_at TEXT")
+
     conn.commit()
     conn.close()
 
@@ -35,18 +70,22 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_license_exists(license_key):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT license_key FROM licenses WHERE license_key = ?", (license_key,))
-    row = cur.fetchone()
-    if not row:
-        cur.execute(
-            "INSERT INTO licenses (license_key, is_active, bound_device, updated_at) VALUES (?, 1, NULL, ?)",
-            (license_key, now_iso()),
-        )
-    conn.commit()
-    conn.close()
+def is_expired(expires_at):
+    if not expires_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(expires_at)
+    except Exception:
+        return True
+
+
+def random_key(prefix):
+    chunks = ["".join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(3)]
+    return f"{prefix}-{'-'.join(chunks)}"
+
+
+def serial_key(prefix, index):
+    return f"{prefix}-{index:06d}"
 
 
 @app.on_event("startup")
@@ -59,24 +98,47 @@ def activate(payload: LicensePayload):
     key = payload.license_key.strip()
     if not key:
         return {"ok": False, "message": "Пустой ключ"}
-    ensure_license_exists(key)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT is_active, bound_device FROM licenses WHERE license_key = ?", (key,))
+    cur.execute("SELECT is_active, expires_at, max_devices FROM licenses WHERE license_key = ?", (key,))
     row = cur.fetchone()
-    if not row or int(row[0]) != 1:
+    if not row:
         conn.close()
-        return {"ok": False, "message": "Ключ неактивен"}
+        return {"ok": False, "message": "Ключ не найден"}
+    if int(row[0]) != 1:
+        conn.close()
+        return {"ok": False, "message": "Ключ отключён"}
+    if is_expired(row[1]):
+        conn.close()
+        return {"ok": False, "message": "Срок действия ключа истёк"}
 
-    bound_device = row[1]
-    if bound_device and bound_device != payload.device_fingerprint:
-        conn.close()
-        return {"ok": False, "message": "Ключ уже активирован на другом устройстве"}
+    max_devices = int(row[2] or 1)
+    cur.execute(
+        "SELECT COUNT(*) FROM activations WHERE license_key = ?",
+        (key,),
+    )
+    used_devices = int(cur.fetchone()[0])
 
     cur.execute(
-        "UPDATE licenses SET bound_device = ?, updated_at = ? WHERE license_key = ?",
-        (payload.device_fingerprint, now_iso(), key),
+        "SELECT id FROM activations WHERE license_key = ? AND device_fingerprint = ?",
+        (key, payload.device_fingerprint),
+    )
+    existing_activation = cur.fetchone()
+
+    if not existing_activation and used_devices >= max_devices:
+        conn.close()
+        return {"ok": False, "message": "Достигнут лимит устройств для этого ключа"}
+
+    if not existing_activation:
+        cur.execute(
+            "INSERT INTO activations (license_key, device_fingerprint, activated_at) VALUES (?, ?, ?)",
+            (key, payload.device_fingerprint, now_iso()),
+        )
+
+    cur.execute(
+        "UPDATE licenses SET updated_at = ? WHERE license_key = ?",
+        (now_iso(), key),
     )
     conn.commit()
     conn.close()
@@ -93,15 +155,26 @@ def validate(payload: LicensePayload):
     key = payload.license_key.strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT is_active, bound_device FROM licenses WHERE license_key = ?", (key,))
+    cur.execute("SELECT is_active, expires_at FROM licenses WHERE license_key = ?", (key,))
     row = cur.fetchone()
-    conn.close()
 
     if not row:
+        conn.close()
         return {"ok": False, "message": "Ключ не найден"}
     if int(row[0]) != 1:
+        conn.close()
         return {"ok": False, "message": "Ключ отключён"}
-    if row[1] != payload.device_fingerprint:
+    if is_expired(row[1]):
+        conn.close()
+        return {"ok": False, "message": "Срок действия ключа истёк"}
+
+    cur.execute(
+        "SELECT id FROM activations WHERE license_key = ? AND device_fingerprint = ?",
+        (key, payload.device_fingerprint),
+    )
+    activation = cur.fetchone()
+    conn.close()
+    if not activation:
         return {"ok": False, "message": "Ключ привязан к другому устройству"}
 
     return {"ok": True, "message": "Лицензия валидна", "license_key": key, "token": f"ok:{key}"}
@@ -112,19 +185,95 @@ def deactivate(payload: LicensePayload):
     key = payload.license_key.strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT bound_device FROM licenses WHERE license_key = ?", (key,))
-    row = cur.fetchone()
-    if not row:
+    cur.execute("SELECT license_key FROM licenses WHERE license_key = ?", (key,))
+    if not cur.fetchone():
         conn.close()
         return {"ok": False, "message": "Ключ не найден"}
-    if row[0] != payload.device_fingerprint:
+
+    cur.execute(
+        "DELETE FROM activations WHERE license_key = ? AND device_fingerprint = ?",
+        (key, payload.device_fingerprint),
+    )
+    if cur.rowcount <= 0:
         conn.close()
         return {"ok": False, "message": "Деактивация разрешена только с привязанного устройства"}
 
     cur.execute(
-        "UPDATE licenses SET bound_device = NULL, updated_at = ? WHERE license_key = ?",
+        "UPDATE licenses SET updated_at = ? WHERE license_key = ?",
         (now_iso(), key),
     )
     conn.commit()
     conn.close()
     return {"ok": True, "message": "Активация сброшена"}
+
+
+@app.post("/admin/generate")
+def admin_generate(payload: GeneratePayload):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    created = []
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.expires_days)).isoformat()
+
+    for i in range(payload.count):
+        if payload.mode == "serial":
+            key_value = serial_key(payload.prefix.strip().upper() or "CG", payload.serial_start + i)
+        else:
+            key_value = random_key(payload.prefix.strip().upper() or "CG")
+
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO licenses (license_key, is_active, expires_at, max_devices, created_at, updated_at)
+            VALUES (?, 1, ?, ?, ?, ?)
+            """,
+            (key_value, expires_at, payload.max_devices, now_iso(), now_iso()),
+        )
+        if cur.rowcount > 0:
+            created.append(key_value)
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok": True,
+        "message": f"Создано ключей: {len(created)}",
+        "keys": created,
+        "expires_at": expires_at,
+        "max_devices": payload.max_devices,
+    }
+
+
+@app.get("/admin/list")
+def admin_list(limit: int = 50):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT license_key, is_active, expires_at, max_devices, created_at, updated_at
+        FROM licenses
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (max(1, min(limit, 500)),),
+    )
+    rows = cur.fetchall()
+
+    data = []
+    for row in rows:
+        cur.execute("SELECT COUNT(*) FROM activations WHERE license_key = ?", (row[0],))
+        used = int(cur.fetchone()[0])
+        data.append(
+            {
+                "license_key": row[0],
+                "is_active": bool(row[1]),
+                "expires_at": row[2],
+                "max_devices": int(row[3] or 1),
+                "used_devices": used,
+                "created_at": row[4],
+                "updated_at": row[5],
+            }
+        )
+
+    conn.close()
+    return {"ok": True, "items": data}
