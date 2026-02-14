@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QTabWidget,
     QLineEdit,
+    QHeaderView,
 )
 
 APP_VERSION = "0.1.0"
@@ -807,10 +808,14 @@ class MainWindow(QMainWindow):
 
         preview_group = QGroupBox("Предпросмотр сгенерированных промптов")
         preview_layout = QVBoxLayout()
-        self.table = QTableWidget(0, 1)
-        self.table.setHorizontalHeaderLabels(["Сгенерированный промпт"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table = QTableWidget(0, 2)
+        self.table.horizontalHeader().hide()
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(1, 44)
         self.table.setWordWrap(True)
+        self.table.setMinimumHeight(220)
         preview_layout.addWidget(self.table)
         preview_group.setLayout(preview_layout)
         prompt_tab_layout.addWidget(preview_group)
@@ -1025,7 +1030,6 @@ class MainWindow(QMainWindow):
             return
 
         self.generated_prompts = []
-        self.table.setRowCount(0)
         max_len = max(len(a), len(b), len(c))
         if max_len == 0:
             self.generated_prompts = [template]
@@ -1039,13 +1043,29 @@ class MainWindow(QMainWindow):
                 if c and i < len(c):
                     prompt = prompt.replace("{C}", c[i])
                 self.generated_prompts.append(prompt)
+        self.refresh_prompts_table()
 
-        for prompt in self.generated_prompts:
+        self.log(f"Создано промптов: {len(self.generated_prompts)}")
+
+    def refresh_prompts_table(self):
+        self.table.setRowCount(0)
+        for index, prompt in enumerate(self.generated_prompts):
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(prompt))
 
-        self.log(f"Создано промптов: {len(self.generated_prompts)}")
+            delete_btn = QPushButton("🗑")
+            delete_btn.setToolTip("Удалить промпт")
+            delete_btn.setMinimumHeight(28)
+            delete_btn.clicked.connect(lambda _, r=index: self.remove_prompt_row(r))
+            self.table.setCellWidget(row, 1, delete_btn)
+
+    def remove_prompt_row(self, row_index):
+        if row_index < 0 or row_index >= len(self.generated_prompts):
+            return
+        del self.generated_prompts[row_index]
+        self.refresh_prompts_table()
+        self.log(f"Удалён промпт. Осталось: {len(self.generated_prompts)}")
 
     def export_prompts(self):
         if not self.work_dir:
