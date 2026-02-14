@@ -669,7 +669,7 @@ class MainWindow(QMainWindow):
             "generation_wait_timeout": 300,
             "app_version": APP_VERSION,
             "auto_update_check": True,
-            "update_manifest_url": "https://raw.githubusercontent.com/lana-info/Clipart-Generator/main/version.json",
+            "update_manifest_url": "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json",
             "kie_api_key": "",
             "remember_api_key": True,
             "kie_upload_path": "clipart-generator",
@@ -1385,7 +1385,8 @@ class MainWindow(QMainWindow):
                 method="GET",
             )
             with request.urlopen(req, timeout=20) as resp:
-                manifest = json.loads(resp.read().decode("utf-8"))
+                # Поддержка BOM в JSON (например, если version.json сохранён PowerShell с UTF-8 BOM).
+                manifest = json.loads(resp.read().decode("utf-8-sig"))
 
             latest_version = str(manifest.get("latest_version", "")).strip()
             download_url = str(manifest.get("download_url", "")).strip()
