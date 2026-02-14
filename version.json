@@ -1,6 +1,5 @@
 ﻿{
-  "latest_version": "0.1.0",
-  "download_url": "",
-  "sha256": ""
+    "latest_version":  "0.1.0",
+    "download_url":  "https://github.com/lana-info/Clipart-Generator-Updates/releases/download/v0.1.0/ClipartGenerator-Setup-0.1.0.exe",
+    "sha256":  "8d1ae99864bb5cf8d255a73522132cb82a6e77ef9983259c63427e88d96826d6"
 }
-
