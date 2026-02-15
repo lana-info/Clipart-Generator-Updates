@@ -699,6 +699,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Clipart Generator")
+        self.resize(980, 780)
 
         self.work_dir = ""
         self.worker = None
@@ -712,29 +713,8 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
-        self.apply_default_window_size()
         self.setup_settings_autosave_connections()
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
-
-    def apply_default_window_size(self):
-        base_width = 960
-        base_height = 700
-        min_width = 900
-        min_height = 620
-
-        target_width = base_width
-        target_height = base_height
-
-        screen = QApplication.primaryScreen()
-        if screen:
-            geometry = screen.availableGeometry()
-            max_width = max(min_width, int(geometry.width() * 0.95))
-            max_height = max(min_height, int(geometry.height() * 0.9))
-            target_width = min(base_width, max_width)
-            target_height = min(base_height, max_height)
-
-        self.resize(target_width, target_height)
-        self.setMinimumSize(min_width, min_height)
 
     def load_config(self):
         default_config = {
@@ -775,6 +755,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(8)
 
         self.primary_button_style = (
             "QPushButton {background:#14b8a6; color:white; font-weight:700; border-radius:8px; padding:8px 16px;}"
@@ -861,15 +842,42 @@ class MainWindow(QMainWindow):
 
         self.template_prompt_group = QGroupBox("Master Prompt (шаблон с {A}, {B}, {C})")
         prompt_layout = QVBoxLayout()
+        prompt_layout.setSpacing(6)
         self.master_prompt = QTextEdit()
         self.master_prompt.setPlaceholderText("Введите шаблон промпта. Используйте {A}, {B}, {C}.")
         self.master_prompt.setMinimumHeight(80)
         prompt_layout.addWidget(self.master_prompt)
 
+        add_values_layout = QHBoxLayout()
+        add_values_layout.addWidget(QLabel("Добавить значение:"))
+        self.btn_add_a = QPushButton("+A")
+        self.btn_add_b = QPushButton("+B")
+        self.btn_add_c = QPushButton("+C")
+        self.btn_add_a.setFixedSize(34, 24)
+        self.btn_add_b.setFixedSize(34, 24)
+        self.btn_add_c.setFixedSize(34, 24)
+        compact_add_style = (
+            "QPushButton {background:#14b8a6; color:white; font-weight:700; border-radius:6px; padding:0px;}"
+            "QPushButton:hover {background:#0f9f90;}"
+            "QPushButton:disabled {background:#9ca3af; color:white;}"
+        )
+        self.btn_add_a.setStyleSheet(compact_add_style)
+        self.btn_add_b.setStyleSheet(compact_add_style)
+        self.btn_add_c.setStyleSheet(compact_add_style)
+        add_values_layout.addWidget(self.btn_add_a)
+        add_values_layout.addWidget(self.btn_add_b)
+        add_values_layout.addWidget(self.btn_add_c)
+        add_values_layout.addStretch()
+        prompt_layout.addLayout(add_values_layout)
+
         fields_layout = QHBoxLayout()
+        fields_layout.setSpacing(6)
         self.field_a = self.create_template_values_table("A")
         self.field_b = self.create_template_values_table("B")
         self.field_c = self.create_template_values_table("C")
+        self.btn_add_a.clicked.connect(lambda: self.add_template_value_row(self.field_a))
+        self.btn_add_b.clicked.connect(lambda: self.add_template_value_row(self.field_b))
+        self.btn_add_c.clicked.connect(lambda: self.add_template_value_row(self.field_c))
         fields_layout.addWidget(self.create_template_column("A", self.field_a))
         fields_layout.addWidget(self.create_template_column("B", self.field_b))
         fields_layout.addWidget(self.create_template_column("C", self.field_c))
@@ -1097,6 +1105,9 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.progress_bar)
         log_layout.addLayout(run_layout)
         log_group.setLayout(log_layout)
+        log_group.setFixedHeight(170)
+        main_layout.setStretch(2, 1)
+        main_layout.setStretch(3, 0)
         main_layout.addWidget(log_group)
 
         self.on_mode_changed(True)
@@ -1118,14 +1129,10 @@ class MainWindow(QMainWindow):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel(f"{title}:"))
-        add_btn = QPushButton("+")
-        add_btn.setFixedWidth(36)
-        add_btn.setStyleSheet(self.primary_button_style)
-        add_btn.clicked.connect(lambda: self.add_template_value_row(table))
         header_layout.addStretch()
-        header_layout.addWidget(add_btn)
         layout.addLayout(header_layout)
         layout.addWidget(table)
         return container
