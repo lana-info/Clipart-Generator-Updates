@@ -699,7 +699,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Clipart Generator")
-        self.resize(980, 780)
 
         self.work_dir = ""
         self.worker = None
@@ -713,8 +712,29 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
+        self.apply_default_window_size()
         self.setup_settings_autosave_connections()
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
+
+    def apply_default_window_size(self):
+        base_width = 960
+        base_height = 700
+        min_width = 900
+        min_height = 620
+
+        target_width = base_width
+        target_height = base_height
+
+        screen = QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            max_width = max(min_width, int(geometry.width() * 0.95))
+            max_height = max(min_height, int(geometry.height() * 0.9))
+            target_width = min(base_width, max_width)
+            target_height = min(base_height, max_height)
+
+        self.resize(target_width, target_height)
+        self.setMinimumSize(min_width, min_height)
 
     def load_config(self):
         default_config = {
