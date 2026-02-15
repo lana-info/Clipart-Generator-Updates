@@ -6,6 +6,7 @@ import uuid
 import tempfile
 import hashlib
 import mimetypes
+import re
 from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
@@ -13,6 +14,7 @@ from datetime import datetime
 from PIL import Image
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -127,7 +129,7 @@ class WorkerThread(QThread):
                 if process_generated:
                     uploaded_url = self._kie_upload_file(gen_path)
                     self.progress.emit("  Загружено в KIE")
-                    final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "gen")
+                    final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "gen", gen_path)
 
                 out_path = os.path.join(output_dir, f"result_{idx:03d}.png")
                 self._download_file(final_url, out_path)
@@ -173,7 +175,7 @@ class WorkerThread(QThread):
 
                 uploaded_url = self._kie_upload_file(file_path)
                 self.progress.emit("  Загружено в KIE")
-                final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "file")
+                final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "file", file_path)
 
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 out_path = os.path.join(output_dir, f"{base}_processed.png")
@@ -187,16 +189,19 @@ class WorkerThread(QThread):
         if emit_final:
             self.finished.emit(f"Mode 2: Готово ({done}/{total})")
 
-    def _run_kie_processing_pipeline(self, image_url, raw_dir, idx, prefix):
+    def _run_kie_processing_pipeline(self, image_url, raw_dir, idx, prefix, source_image_path=""):
         pipeline_url = image_url
 
         if self.upscale:
             self.progress.emit(f"  Апскейл через {self.kie_upscale_model}...")
             upscale_input = {}
-            if self.upscale_factor in {2, 3, 4}:
+            max_side = self._parse_max_side(self.upscale_target_size)
+            target_size = self._calculate_target_size(source_image_path, max_side)
+            if target_size:
+                upscale_input["size"] = target_size
+                self.progress.emit(f"  Целевой размер по максимальной стороне: {target_size}")
+            elif self.upscale_factor in {2, 3, 4}:
                 upscale_input["scale"] = self.upscale_factor
-            if self.upscale_target_size:
-                upscale_input["size"] = self.upscale_target_size
             pipeline_url = self._kie_run_model_task(self.kie_upscale_model, pipeline_url, extra_input=upscale_input)
             upscaled_path = os.path.join(raw_dir, f"{prefix}_upscaled_{idx:03d}.png")
             self._download_file(pipeline_url, upscaled_path)
@@ -210,6 +215,39 @@ class WorkerThread(QThread):
             self.progress.emit(f"  Промежуточный без фона: {nobg_path}")
 
         return pipeline_url
+
+    def _parse_max_side(self, raw_value):
+        text = str(raw_value or "").strip().lower()
+        if not text:
+            return 0
+        if text.isdigit():
+            return max(0, int(text))
+        numbers = [int(x) for x in re.findall(r"\d+", text)]
+        if not numbers:
+            return 0
+        return max(numbers)
+
+    def _calculate_target_size(self, image_path, max_side):
+        if max_side <= 0:
+            return ""
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+        except Exception as e:
+            self.progress.emit(f"  Не удалось прочитать размер изображения: {e}")
+            return ""
+
+        if width <= 0 or height <= 0:
+            return ""
+
+        if width >= height:
+            new_width = max_side
+            new_height = max(1, int(round((height / width) * max_side)))
+        else:
+            new_height = max_side
+            new_width = max(1, int(round((width / height) * max_side)))
+
+        return f"{new_width}x{new_height}"
 
     def _kie_headers(self):
         return {
@@ -644,6 +682,19 @@ class WorkerThread(QThread):
             self.progress.emit(f"  Не удалось установить DPI для {os.path.basename(file_path)}: {e}")
 
 
+class PromptTableWidget(QTableWidget):
+    bulkTextPasted = pyqtSignal(str)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Paste):
+            text = QApplication.clipboard().text()
+            if text:
+                self.bulkTextPasted.emit(text)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -654,9 +705,15 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.generated_prompts = []
         self.selected_files = []
+        self.is_updating_prompts_table = False
+        self.settings_save_timer = QTimer(self)
+        self.settings_save_timer.setSingleShot(True)
+        self.settings_save_timer.setInterval(400)
+        self.settings_save_timer.timeout.connect(self.persist_ui_settings)
 
         self.load_config()
         self.setup_ui()
+        self.setup_settings_autosave_connections()
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
 
     def load_config(self):
@@ -667,7 +724,6 @@ class MainWindow(QMainWindow):
             "app_version": APP_VERSION,
             "update_manifest_url": UPDATE_MANIFEST_URL,
             "kie_api_key": "",
-            "remember_api_key": True,
             "kie_upload_path": "clipart-generator",
             "generation_model": "gpt4o-image",
             "generation_size": "1:1",
@@ -678,6 +734,7 @@ class MainWindow(QMainWindow):
             "kie_upscale_model": "topaz/upscale",
             "kie_remove_bg_model": "recraft/remove-background",
             "run_mode": "generate_only",
+            "prompt_input_mode": "list",
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
@@ -767,55 +824,82 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(settings_tab, "Настройки")
         main_layout.addWidget(self.tabs)
 
-        prompt_group = QGroupBox("Master Prompt (шаблон с {A}, {B}, {C})")
+        prompt_mode_group = QGroupBox("Режим ввода промптов")
+        prompt_mode_layout = QHBoxLayout()
+        self.prompt_input_mode_group = QButtonGroup()
+        self.radio_prompt_list = QRadioButton("Список промптов")
+        self.radio_prompt_template = QRadioButton("Шаблон (A/B/C)")
+        self.prompt_input_mode_group.addButton(self.radio_prompt_list, 1)
+        self.prompt_input_mode_group.addButton(self.radio_prompt_template, 2)
+        self.radio_prompt_template.toggled.connect(self.on_prompt_input_mode_changed)
+        self.radio_prompt_list.toggled.connect(self.on_prompt_input_mode_changed)
+        prompt_mode_layout.addWidget(self.radio_prompt_list)
+        prompt_mode_layout.addWidget(self.radio_prompt_template)
+        prompt_mode_layout.addStretch()
+        prompt_mode_group.setLayout(prompt_mode_layout)
+        prompt_tab_layout.addWidget(prompt_mode_group)
+
+        self.template_prompt_group = QGroupBox("Master Prompt (шаблон с {A}, {B}, {C})")
         prompt_layout = QVBoxLayout()
         self.master_prompt = QTextEdit()
         self.master_prompt.setPlaceholderText("Введите шаблон промпта. Используйте {A}, {B}, {C}.")
-        self.master_prompt.setMinimumHeight(100)
+        self.master_prompt.setMinimumHeight(80)
         prompt_layout.addWidget(self.master_prompt)
 
-        fields_layout = QGridLayout()
-        self.field_a = QTextEdit()
-        self.field_a.setPlaceholderText("A: значения, каждое с новой строки")
-        self.field_a.setMaximumHeight(80)
-        self.field_b = QTextEdit()
-        self.field_b.setPlaceholderText("B: значения, каждое с новой строки")
-        self.field_b.setMaximumHeight(80)
-        self.field_c = QTextEdit()
-        self.field_c.setPlaceholderText("C: значения, каждое с новой строки")
-        self.field_c.setMaximumHeight(80)
-        fields_layout.addWidget(QLabel("A:"), 0, 0)
-        fields_layout.addWidget(self.field_a, 0, 1)
-        fields_layout.addWidget(QLabel("B:"), 0, 2)
-        fields_layout.addWidget(self.field_b, 0, 3)
-        fields_layout.addWidget(QLabel("C:"), 1, 0)
-        fields_layout.addWidget(self.field_c, 1, 1)
+        fields_layout = QHBoxLayout()
+        self.field_a = self.create_template_values_table("A")
+        self.field_b = self.create_template_values_table("B")
+        self.field_c = self.create_template_values_table("C")
+        fields_layout.addWidget(self.create_template_column("A", self.field_a))
+        fields_layout.addWidget(self.create_template_column("B", self.field_b))
+        fields_layout.addWidget(self.create_template_column("C", self.field_c))
         prompt_layout.addLayout(fields_layout)
-        prompt_group.setLayout(prompt_layout)
-        prompt_tab_layout.addWidget(prompt_group)
+        self.template_prompt_group.setLayout(prompt_layout)
+        prompt_tab_layout.addWidget(self.template_prompt_group)
 
         prompt_btn_layout = QHBoxLayout()
         self.btn_build = QPushButton("Создать промпты")
         self.btn_build.clicked.connect(self.build_prompts)
+        self.btn_build.setToolTip("Создаёт промпты по шаблону с {A}, {B}, {C}")
         self.btn_export = QPushButton("Экспорт промптов")
         self.btn_export.clicked.connect(self.export_prompts)
+        self.btn_add_prompt_row = QPushButton("+")
+        self.btn_add_prompt_row.clicked.connect(self.add_prompt_row)
+        self.btn_add_prompt_row.setToolTip("Добавить строку промпта")
+        self.btn_clear_prompts = QPushButton("Удалить все")
+        self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
+        self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
         self.btn_build.setStyleSheet(self.primary_button_style)
         self.btn_export.setStyleSheet(self.primary_button_style)
+        self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
+        self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
         prompt_btn_layout.addWidget(self.btn_build)
         prompt_btn_layout.addWidget(self.btn_export)
+        prompt_btn_layout.addWidget(self.btn_add_prompt_row)
         prompt_btn_layout.addStretch()
+        prompt_btn_layout.addWidget(self.btn_clear_prompts)
         prompt_tab_layout.addLayout(prompt_btn_layout)
 
-        preview_group = QGroupBox("Предпросмотр сгенерированных промптов")
+        prompt_mode = str(self.config.get("prompt_input_mode", "list"))
+        if prompt_mode == "template":
+            self.radio_prompt_template.setChecked(True)
+        else:
+            self.radio_prompt_list.setChecked(True)
+        self.on_prompt_input_mode_changed(True)
+
+        preview_group = QGroupBox("Список промптов")
         preview_layout = QVBoxLayout()
-        self.table = QTableWidget(0, 2)
+        self.table = PromptTableWidget(0, 2)
         self.table.horizontalHeader().hide()
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(1, 44)
         self.table.setWordWrap(False)
-        self.table.setMinimumHeight(150)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setMinimumHeight(280)
+        self.table.bulkTextPasted.connect(self.on_table_bulk_paste)
+        self.table.itemChanged.connect(self.on_prompt_item_changed)
         preview_layout.addWidget(self.table)
         preview_group.setLayout(preview_layout)
         prompt_tab_layout.addWidget(preview_group)
@@ -831,6 +915,19 @@ class MainWindow(QMainWindow):
         files_layout.addWidget(self.lbl_files_count)
         files_group.setLayout(files_layout)
         process_tab_layout.addWidget(files_group)
+
+        process_flags_group = QGroupBox("Параметры обработки")
+        process_flags_layout = QHBoxLayout()
+        self.chk_upscale = QCheckBox("Апскейл")
+        self.chk_upscale.setChecked(self.config.get("upscale", True))
+        self.chk_remove_bg = QCheckBox("Удаление фона")
+        self.chk_remove_bg.setChecked(self.config.get("remove_bg", True))
+        process_flags_layout.addWidget(self.chk_upscale)
+        process_flags_layout.addWidget(self.chk_remove_bg)
+        process_flags_layout.addStretch()
+        process_flags_group.setLayout(process_flags_layout)
+        process_tab_layout.addWidget(process_flags_group)
+
         process_tab_layout.addStretch()
 
         kie_group = QGroupBox("KIE: подключение и генерация")
@@ -843,8 +940,6 @@ class MainWindow(QMainWindow):
         self.btn_toggle_api_key.setMinimumHeight(34)
         self.btn_toggle_api_key.setStyleSheet(self.primary_button_style)
         self.btn_toggle_api_key.clicked.connect(self.toggle_api_key_visibility)
-        self.chk_remember_api_key = QCheckBox("Запоминать API ключ")
-        self.chk_remember_api_key.setChecked(bool(self.config.get("remember_api_key", True)))
         self.kie_upload_path_input = QLineEdit(self.config.get("kie_upload_path", "clipart-generator"))
 
         self.generation_model_combo = QComboBox()
@@ -905,29 +1000,24 @@ class MainWindow(QMainWindow):
         kie_layout.addWidget(lbl_api_key, 0, 0)
         kie_layout.addWidget(self.kie_api_key_input, 0, 1, 1, 2)
         kie_layout.addWidget(self.btn_toggle_api_key, 0, 3)
-        kie_layout.addWidget(self.chk_remember_api_key, 1, 1, 1, 3)
-        kie_layout.addWidget(lbl_upload_path, 2, 0)
-        kie_layout.addWidget(self.kie_upload_path_input, 2, 1, 1, 3)
-        kie_layout.addWidget(lbl_gen_model, 3, 0)
-        kie_layout.addWidget(self.generation_model_combo, 3, 1)
-        kie_layout.addWidget(lbl_gen_size, 3, 2)
-        kie_layout.addWidget(self.generation_size_combo, 3, 3)
-        kie_layout.addWidget(lbl_retries, 4, 0)
-        kie_layout.addWidget(self.retries, 4, 1)
-        kie_layout.addWidget(lbl_timeout, 4, 2)
-        kie_layout.addWidget(self.timeout, 4, 3)
-        kie_layout.addWidget(lbl_generation_wait, 5, 0)
-        kie_layout.addWidget(self.generation_wait_timeout, 5, 1)
-        kie_layout.addWidget(self.btn_check_model, 6, 1, 1, 2)
+        kie_layout.addWidget(lbl_upload_path, 1, 0)
+        kie_layout.addWidget(self.kie_upload_path_input, 1, 1, 1, 3)
+        kie_layout.addWidget(lbl_gen_model, 2, 0)
+        kie_layout.addWidget(self.generation_model_combo, 2, 1)
+        kie_layout.addWidget(lbl_gen_size, 2, 2)
+        kie_layout.addWidget(self.generation_size_combo, 2, 3)
+        kie_layout.addWidget(lbl_retries, 3, 0)
+        kie_layout.addWidget(self.retries, 3, 1)
+        kie_layout.addWidget(lbl_timeout, 3, 2)
+        kie_layout.addWidget(self.timeout, 3, 3)
+        kie_layout.addWidget(lbl_generation_wait, 4, 0)
+        kie_layout.addWidget(self.generation_wait_timeout, 4, 1)
+        kie_layout.addWidget(self.btn_check_model, 5, 1, 1, 2)
         kie_group.setLayout(kie_layout)
         settings_tab_layout.addWidget(kie_group)
 
         process_settings_group = QGroupBox("Обработка через KIE")
         process_settings_layout = QGridLayout()
-        self.chk_upscale = QCheckBox("Апскейл")
-        self.chk_upscale.setChecked(self.config.get("upscale", True))
-        self.chk_remove_bg = QCheckBox("Удаление фона")
-        self.chk_remove_bg.setChecked(self.config.get("remove_bg", True))
 
         self.kie_upscale_model_combo = QComboBox()
         self.kie_upscale_model_combo.addItems(["topaz/upscale", "recraft/crisp-upscale"])
@@ -945,18 +1035,16 @@ class MainWindow(QMainWindow):
         self.upscale_factor_combo.addItems(["2", "3", "4"])
         self.upscale_factor_combo.setCurrentText(str(self.config.get("upscale_factor", 4)))
         self.upscale_target_size_input = QLineEdit(str(self.config.get("upscale_target_size", "")))
-        self.upscale_target_size_input.setPlaceholderText("Опционально, например 2048x2048")
+        self.upscale_target_size_input.setPlaceholderText("Опционально, например 3000")
 
-        process_settings_layout.addWidget(self.chk_upscale, 0, 0)
-        process_settings_layout.addWidget(QLabel("Модель апскейла:"), 0, 1)
-        process_settings_layout.addWidget(self.kie_upscale_model_combo, 0, 2)
-        process_settings_layout.addWidget(QLabel("Кратность апскейла:"), 1, 1)
-        process_settings_layout.addWidget(self.upscale_factor_combo, 1, 2)
-        process_settings_layout.addWidget(self.chk_remove_bg, 1, 0)
-        process_settings_layout.addWidget(QLabel("Размер после апскейла:"), 2, 1)
-        process_settings_layout.addWidget(self.upscale_target_size_input, 2, 2)
-        process_settings_layout.addWidget(QLabel("Модель удаления фона:"), 3, 1)
-        process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 3, 2)
+        process_settings_layout.addWidget(QLabel("Модель апскейла:"), 0, 0)
+        process_settings_layout.addWidget(self.kie_upscale_model_combo, 0, 1)
+        process_settings_layout.addWidget(QLabel("Кратность апскейла:"), 1, 0)
+        process_settings_layout.addWidget(self.upscale_factor_combo, 1, 1)
+        process_settings_layout.addWidget(QLabel("Максимальная сторона (px):"), 2, 0)
+        process_settings_layout.addWidget(self.upscale_target_size_input, 2, 1)
+        process_settings_layout.addWidget(QLabel("Модель удаления фона:"), 3, 0)
+        process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 3, 1)
         process_settings_group.setLayout(process_settings_layout)
         settings_tab_layout.addWidget(process_settings_group)
 
@@ -966,7 +1054,7 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout()
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(160)
+        self.log_text.setFixedHeight(80)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -992,6 +1080,96 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(log_group)
 
         self.on_mode_changed(True)
+
+    def create_template_values_table(self, placeholder_prefix):
+        table = QTableWidget(0, 2)
+        table.horizontalHeader().hide()
+        table.verticalHeader().hide()
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(1, 36)
+        table.setWordWrap(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setMinimumHeight(100)
+        table.setProperty("placeholderPrefix", placeholder_prefix)
+        return table
+
+    def create_template_column(self, title, table):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel(f"{title}:"))
+        add_btn = QPushButton("+")
+        add_btn.setFixedWidth(36)
+        add_btn.setStyleSheet(self.primary_button_style)
+        add_btn.clicked.connect(lambda: self.add_template_value_row(table))
+        header_layout.addStretch()
+        header_layout.addWidget(add_btn)
+        layout.addLayout(header_layout)
+        layout.addWidget(table)
+        return container
+
+    def add_template_value_row(self, table):
+        row = table.rowCount()
+        table.insertRow(row)
+        prefix = str(table.property("placeholderPrefix") or "")
+        item = QTableWidgetItem("")
+        item.setToolTip(f"{prefix}: значение для подстановки")
+        table.setItem(row, 0, item)
+
+        delete_btn = QPushButton("🗑")
+        delete_btn.setToolTip("Удалить строку")
+        delete_btn.setMinimumHeight(24)
+        delete_btn.clicked.connect(lambda _, r=row, t=table: self.remove_template_value_row(t, r))
+        table.setCellWidget(row, 1, delete_btn)
+        table.setCurrentCell(row, 0)
+        table.editItem(item)
+
+    def remove_template_value_row(self, table, row_index):
+        if 0 <= row_index < table.rowCount():
+            table.removeRow(row_index)
+            self.refresh_template_value_delete_buttons(table)
+
+    def refresh_template_value_delete_buttons(self, table):
+        for row in range(table.rowCount()):
+            delete_btn = QPushButton("🗑")
+            delete_btn.setToolTip("Удалить строку")
+            delete_btn.setMinimumHeight(24)
+            delete_btn.clicked.connect(lambda _, r=row, t=table: self.remove_template_value_row(t, r))
+            table.setCellWidget(row, 1, delete_btn)
+
+    def get_template_values(self, table):
+        values = []
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            text = (item.text() if item else "").strip()
+            if text:
+                values.append(text)
+        return values
+
+    def setup_settings_autosave_connections(self):
+        self.kie_api_key_input.textChanged.connect(self.schedule_settings_save)
+        self.kie_upload_path_input.textChanged.connect(self.schedule_settings_save)
+        self.generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.retries.valueChanged.connect(self.schedule_settings_save)
+        self.timeout.valueChanged.connect(self.schedule_settings_save)
+        self.generation_wait_timeout.valueChanged.connect(self.schedule_settings_save)
+        self.chk_upscale.toggled.connect(self.schedule_settings_save)
+        self.chk_remove_bg.toggled.connect(self.schedule_settings_save)
+        self.kie_upscale_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.kie_remove_bg_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.upscale_factor_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.upscale_target_size_input.textChanged.connect(self.schedule_settings_save)
+        self.radio_run_generate.toggled.connect(self.schedule_settings_save)
+        self.radio_run_process.toggled.connect(self.schedule_settings_save)
+        self.radio_run_both.toggled.connect(self.schedule_settings_save)
+        self.radio_prompt_template.toggled.connect(self.schedule_settings_save)
+        self.radio_prompt_list.toggled.connect(self.schedule_settings_save)
+
+    def schedule_settings_save(self, *_):
+        self.settings_save_timer.start()
 
     def on_mode_changed(self, checked):
         is_process = self.radio_run_process.isChecked()
@@ -1019,11 +1197,32 @@ class MainWindow(QMainWindow):
             self.lbl_files_count.setText(f"Выбрано файлов: {len(files)}")
             self.log(f"Выбрано файлов: {len(files)}")
 
+    def on_prompt_input_mode_changed(self, checked):
+        current_size = self.size()
+        is_template = self.radio_prompt_template.isChecked()
+        self.template_prompt_group.setVisible(is_template)
+        self.btn_build.setVisible(is_template)
+        self.btn_export.setVisible(is_template)
+        self.btn_add_prompt_row.setVisible(not is_template)
+        if hasattr(self, "table"):
+            self.table.setMinimumHeight(180 if is_template else 280)
+            self.refresh_prompts_table()
+        self.resize(current_size)
+
+    def add_prompt_row(self):
+        if not self.radio_prompt_list.isChecked():
+            return
+        self.generated_prompts.append("")
+        self.refresh_prompts_table()
+        row_index = len(self.generated_prompts) - 1
+        self.table.setCurrentCell(row_index, 0)
+        self.table.editItem(self.table.item(row_index, 0))
+
     def build_prompts(self):
         template = self.master_prompt.toPlainText().strip()
-        a = [x.strip() for x in self.field_a.toPlainText().split("\n") if x.strip()]
-        b = [x.strip() for x in self.field_b.toPlainText().split("\n") if x.strip()]
-        c = [x.strip() for x in self.field_c.toPlainText().split("\n") if x.strip()]
+        a = self.get_template_values(self.field_a)
+        b = self.get_template_values(self.field_b)
+        c = self.get_template_values(self.field_c)
 
         if not template:
             QMessageBox.warning(self, "Ошибка", "Введите Master Prompt")
@@ -1047,18 +1246,114 @@ class MainWindow(QMainWindow):
 
         self.log(f"Создано промптов: {len(self.generated_prompts)}")
 
+    def build_prompts_from_template_inputs(self):
+        template = self.master_prompt.toPlainText().strip()
+        if not template:
+            return []
+
+        a = self.get_template_values(self.field_a)
+        b = self.get_template_values(self.field_b)
+        c = self.get_template_values(self.field_c)
+
+        prompts = []
+        max_len = max(len(a), len(b), len(c))
+        if max_len == 0:
+            prompts = [template]
+        else:
+            for i in range(max_len):
+                prompt = template
+                if a and i < len(a):
+                    prompt = prompt.replace("{A}", a[i])
+                if b and i < len(b):
+                    prompt = prompt.replace("{B}", b[i])
+                if c and i < len(c):
+                    prompt = prompt.replace("{C}", c[i])
+                prompts.append(prompt)
+        return [p.strip() for p in prompts if p.strip()]
+
+    def get_list_mode_prompts(self):
+        prompts = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            text = (item.text() if item else "").strip()
+            if text:
+                prompts.append(text)
+        return prompts
+
+    def import_prompts_from_template(self):
+        raw_text = self.master_prompt.toPlainText().strip()
+        if not raw_text:
+            QMessageBox.warning(self, "Ошибка", "Вставьте список промптов в поле Master Prompt")
+            return
+
+        prompts = self._split_prompts_text(raw_text)
+        if not prompts:
+            QMessageBox.warning(self, "Ошибка", "Не удалось распознать промпты")
+            return
+
+        self.generated_prompts = prompts
+        self.refresh_prompts_table()
+        self.log(f"Импортировано промптов: {len(self.generated_prompts)}")
+
+    def on_table_bulk_paste(self, raw_text):
+        if not self.radio_prompt_list.isChecked():
+            return
+        prompts = self._split_prompts_text(raw_text)
+        self.generated_prompts = prompts
+        self.refresh_prompts_table()
+        self.log(f"Вставлено промптов: {len(self.generated_prompts)}")
+
+    def _split_prompts_text(self, raw_text):
+        text = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return []
+
+        if "\t" in text:
+            prompts = []
+            for line in text.split("\n"):
+                for cell in line.split("\t"):
+                    item = cell.strip()
+                    if item:
+                        prompts.append(item)
+            if prompts:
+                return prompts
+
+        blocks = [b.strip() for b in re.split(r"\n\s*\n+", text) if b.strip()]
+        if blocks:
+            return blocks
+
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(lines) > 1:
+            return lines
+
+        return [text]
+
     def refresh_prompts_table(self):
+        self.is_updating_prompts_table = True
         self.table.setRowCount(0)
         for index, prompt in enumerate(self.generated_prompts):
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(prompt))
+            item = QTableWidgetItem(prompt)
+            if not self.radio_prompt_list.isChecked():
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 0, item)
 
             delete_btn = QPushButton("🗑")
             delete_btn.setToolTip("Удалить промпт")
             delete_btn.setMinimumHeight(28)
             delete_btn.clicked.connect(lambda _, r=index: self.remove_prompt_row(r))
             self.table.setCellWidget(row, 1, delete_btn)
+        self.is_updating_prompts_table = False
+
+    def on_prompt_item_changed(self, item):
+        if self.is_updating_prompts_table:
+            return
+        if not self.radio_prompt_list.isChecked() or item.column() != 0:
+            return
+        row = item.row()
+        if 0 <= row < len(self.generated_prompts):
+            self.generated_prompts[row] = item.text()
 
     def remove_prompt_row(self, row_index):
         if row_index < 0 or row_index >= len(self.generated_prompts):
@@ -1066,6 +1361,11 @@ class MainWindow(QMainWindow):
         del self.generated_prompts[row_index]
         self.refresh_prompts_table()
         self.log(f"Удалён промпт. Осталось: {len(self.generated_prompts)}")
+
+    def clear_all_prompts(self):
+        self.generated_prompts = []
+        self.refresh_prompts_table()
+        self.log("Список промптов очищен")
 
     def export_prompts(self):
         if not self.work_dir:
@@ -1092,29 +1392,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Выберите рабочую папку")
             return
 
-        current_api_key = self.kie_api_key_input.text().strip()
-        self.config["retries"] = self.retries.value()
-        self.config["timeout"] = self.timeout.value()
-        self.config["generation_wait_timeout"] = self.generation_wait_timeout.value()
-        self.config["remember_api_key"] = self.chk_remember_api_key.isChecked()
-        self.config["kie_api_key"] = current_api_key if self.config["remember_api_key"] else ""
-        self.config["kie_upload_path"] = self.kie_upload_path_input.text().strip() or "clipart-generator"
-        self.config["generation_model"] = self.generation_model_combo.currentText()
-        self.config["generation_size"] = self.generation_size_combo.currentText()
-        self.config["remove_bg"] = self.chk_remove_bg.isChecked()
-        self.config["upscale"] = self.chk_upscale.isChecked()
-        self.config["upscale_factor"] = int(self.upscale_factor_combo.currentText())
-        self.config["upscale_target_size"] = self.upscale_target_size_input.text().strip()
-        self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
-        self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
-        self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
-        if self.radio_run_process.isChecked():
-            self.config["run_mode"] = "process_only"
-        elif self.radio_run_both.isChecked():
-            self.config["run_mode"] = "both"
-        else:
-            self.config["run_mode"] = "generate_only"
-        self.save_config()
+        self.persist_ui_settings()
+        current_api_key = self.config.get("kie_api_key", "").strip()
 
         if not current_api_key:
             QMessageBox.warning(self, "Ошибка", "Укажите KIE API Key на вкладке «Настройки»")
@@ -1122,6 +1401,20 @@ class MainWindow(QMainWindow):
 
         runtime_settings = dict(self.config)
         runtime_settings["kie_api_key"] = current_api_key
+
+        if self.radio_prompt_template.isChecked():
+            active_prompts = self.build_prompts_from_template_inputs()
+            if not active_prompts:
+                QMessageBox.warning(self, "Ошибка", "Для шаблона заполните Master Prompt")
+                return
+        else:
+            active_prompts = self.get_list_mode_prompts()
+            if not active_prompts:
+                QMessageBox.warning(self, "Ошибка", "Для списка добавьте хотя бы один промпт")
+                return
+
+        self.generated_prompts = active_prompts
+        self.refresh_prompts_table()
 
         run_mode = self.config.get("run_mode", "generate_only")
 
@@ -1132,14 +1425,8 @@ class MainWindow(QMainWindow):
                 return
         elif run_mode == "both":
             mode = "mode_both"
-            if not [p.strip() for p in self.generated_prompts if p.strip()]:
-                QMessageBox.warning(self, "Ошибка", "Для Mode 1 сначала создайте промпты")
-                return
         else:
             mode = "mode1_generate_only"
-            if not [p.strip() for p in self.generated_prompts if p.strip()]:
-                QMessageBox.warning(self, "Ошибка", "Для генерации сначала создайте промпты")
-                return
 
         self.worker = WorkerThread(
             mode=mode,
@@ -1392,6 +1679,38 @@ class MainWindow(QMainWindow):
             "16:9": "1536x1024",
             "9:16": "1024x1536",
         }.get(ratio, "1024x1024")
+
+    def persist_ui_settings(self):
+        self.config["retries"] = self.retries.value()
+        self.config["timeout"] = self.timeout.value()
+        self.config["generation_wait_timeout"] = self.generation_wait_timeout.value()
+        self.config["kie_api_key"] = self.kie_api_key_input.text().strip()
+        self.config["kie_upload_path"] = self.kie_upload_path_input.text().strip() or "clipart-generator"
+        self.config["generation_model"] = self.generation_model_combo.currentText()
+        self.config["generation_size"] = self.generation_size_combo.currentText()
+        self.config["remove_bg"] = self.chk_remove_bg.isChecked()
+        self.config["upscale"] = self.chk_upscale.isChecked()
+        self.config["upscale_factor"] = int(self.upscale_factor_combo.currentText())
+        self.config["upscale_target_size"] = self.upscale_target_size_input.text().strip()
+        self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
+        self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
+        self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
+        self.config["prompt_input_mode"] = "template" if self.radio_prompt_template.isChecked() else "list"
+        if self.radio_run_process.isChecked():
+            self.config["run_mode"] = "process_only"
+        elif self.radio_run_both.isChecked():
+            self.config["run_mode"] = "both"
+        else:
+            self.config["run_mode"] = "generate_only"
+        self.save_config()
+
+    def closeEvent(self, event):
+        try:
+            self.settings_save_timer.stop()
+            self.persist_ui_settings()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":
