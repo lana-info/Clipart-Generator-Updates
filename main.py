@@ -796,6 +796,13 @@ class MainWindow(QMainWindow):
             "QPushButton:hover {background:#0f9f90;}"
             "QPushButton:disabled {background:#9ca3af; color:white;}"
         )
+        self.compact_button_style = (
+            "QPushButton {background:#14b8a6; color:white; font-weight:700; border-radius:7px; padding:5px 10px;}"
+            "QPushButton:hover {background:#0f9f90;}"
+            "QPushButton:disabled {background:#9ca3af; color:white;}"
+        )
+        self.standard_button_width = 140
+        self.standard_button_height = 36
 
         self.setStyleSheet(
             "QRadioButton::indicator, QCheckBox::indicator {width: 16px; height: 16px;}"
@@ -808,7 +815,7 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout()
         self.lbl_work_dir = QLabel("Рабочая папка: не выбрана")
         self.btn_select_dir = QPushButton("Выбрать папку")
-        self.btn_select_dir.setMinimumHeight(44)
+        self.btn_select_dir.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_select_dir.setStyleSheet(self.primary_button_style)
         self.btn_select_dir.clicked.connect(self.select_work_dir)
         top_layout.addWidget(self.lbl_work_dir)
@@ -854,6 +861,7 @@ class MainWindow(QMainWindow):
         process_tab_layout = QVBoxLayout(process_tab)
         settings_tab = QWidget()
         settings_tab_layout = QVBoxLayout(settings_tab)
+        settings_tab_layout.setSpacing(8)
         self.tabs.addTab(prompt_tab, "Промпты")
         self.tabs.addTab(process_tab, "Обработка")
         self.tabs.addTab(settings_tab, "Настройки")
@@ -868,6 +876,8 @@ class MainWindow(QMainWindow):
         self.btn_clear_prompts = QPushButton("Удалить все")
         self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
+        self.btn_export.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_clear_prompts.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_export.setStyleSheet(self.primary_button_style)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
@@ -897,7 +907,7 @@ class MainWindow(QMainWindow):
         files_group = QGroupBox("Файлы для обработки")
         files_layout = QVBoxLayout()
         self.btn_select_files = QPushButton("Выбрать файлы")
-        self.btn_select_files.setMinimumHeight(44)
+        self.btn_select_files.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_select_files.setStyleSheet(self.primary_button_style)
         self.btn_select_files.clicked.connect(self.select_files)
         self.lbl_files_count = QLabel("Файлов не выбрано")
@@ -921,16 +931,17 @@ class MainWindow(QMainWindow):
         process_tab_layout.addStretch()
 
         kie_group = QGroupBox("KIE: подключение и генерация")
+        kie_group.setMaximumWidth(720)
         kie_layout = QGridLayout()
-        kie_layout.setHorizontalSpacing(8)
+        kie_layout.setHorizontalSpacing(6)
+        kie_layout.setVerticalSpacing(6)
         self.kie_api_key_input = QLineEdit()
         self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.kie_api_key_input.setText(self.config.get("kie_api_key", ""))
         self.btn_toggle_api_key = QPushButton("Показать")
-        self.btn_toggle_api_key.setMinimumHeight(34)
-        self.btn_toggle_api_key.setStyleSheet(self.primary_button_style)
+        self.btn_toggle_api_key.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_toggle_api_key.setStyleSheet(self.compact_button_style)
         self.btn_toggle_api_key.clicked.connect(self.toggle_api_key_visibility)
-        self.kie_upload_path_input = QLineEdit(self.config.get("kie_upload_path", "clipart-generator"))
 
         self.generation_model_combo = QComboBox()
         self.generation_model_combo.addItems([
@@ -957,57 +968,39 @@ class MainWindow(QMainWindow):
         if size_value in legacy_map:
             size_value = legacy_map[size_value]
         self.generation_size_combo.setCurrentText(size_value if size_value else "1:1")
-        self.btn_check_model = QPushButton("Проверить модель")
-        self.btn_check_model.setMinimumHeight(34)
-        self.btn_check_model.setStyleSheet(self.primary_button_style)
+        self.btn_check_model = QPushButton("Проверить")
+        self.btn_check_model.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_check_model.setStyleSheet(self.compact_button_style)
         self.btn_check_model.clicked.connect(self.check_generation_model)
 
-        self.retries = QSpinBox()
-        self.retries.setRange(0, 10)
-        self.retries.setValue(int(self.config.get("retries", 3)))
-        self.timeout = QSpinBox()
-        self.timeout.setRange(10, 600)
-        self.timeout.setValue(int(self.config.get("timeout", 60)))
-        self.generation_wait_timeout = QSpinBox()
-        self.generation_wait_timeout.setRange(120, 1800)
-        self.generation_wait_timeout.setValue(int(self.config.get("generation_wait_timeout", 300)))
+        settings_field_width = 220
+        self.kie_api_key_input.setFixedSize(settings_field_width, 32)
+        self.generation_model_combo.setFixedSize(settings_field_width, 32)
+        self.generation_size_combo.setFixedSize(settings_field_width, 32)
 
         lbl_api_key = QLabel("KIE API Key:")
         lbl_api_key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_upload_path = QLabel("KIE Upload Path:")
-        lbl_upload_path.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lbl_gen_model = QLabel("Модель генерации:")
         lbl_gen_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_gen_size = QLabel("Соотношение сторон:")
+        lbl_gen_size = QLabel("Соотношение:")
         lbl_gen_size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_retries = QLabel("Retries:")
-        lbl_retries.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_timeout = QLabel("Timeout (s):")
-        lbl_timeout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_generation_wait = QLabel("Ожидание генерации (s):")
-        lbl_generation_wait.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         kie_layout.addWidget(lbl_api_key, 0, 0)
-        kie_layout.addWidget(self.kie_api_key_input, 0, 1, 1, 2)
-        kie_layout.addWidget(self.btn_toggle_api_key, 0, 3)
-        kie_layout.addWidget(lbl_upload_path, 1, 0)
-        kie_layout.addWidget(self.kie_upload_path_input, 1, 1, 1, 3)
-        kie_layout.addWidget(lbl_gen_model, 2, 0)
-        kie_layout.addWidget(self.generation_model_combo, 2, 1)
-        kie_layout.addWidget(lbl_gen_size, 2, 2)
-        kie_layout.addWidget(self.generation_size_combo, 2, 3)
-        kie_layout.addWidget(lbl_retries, 3, 0)
-        kie_layout.addWidget(self.retries, 3, 1)
-        kie_layout.addWidget(lbl_timeout, 3, 2)
-        kie_layout.addWidget(self.timeout, 3, 3)
-        kie_layout.addWidget(lbl_generation_wait, 4, 0)
-        kie_layout.addWidget(self.generation_wait_timeout, 4, 1)
-        kie_layout.addWidget(self.btn_check_model, 5, 1, 1, 2)
+        kie_layout.addWidget(self.kie_api_key_input, 0, 1)
+        kie_layout.addWidget(self.btn_toggle_api_key, 0, 2)
+        kie_layout.addWidget(lbl_gen_model, 1, 0)
+        kie_layout.addWidget(self.generation_model_combo, 1, 1)
+        kie_layout.addWidget(self.btn_check_model, 1, 2)
+        kie_layout.addWidget(lbl_gen_size, 2, 0)
+        kie_layout.addWidget(self.generation_size_combo, 2, 1)
         kie_group.setLayout(kie_layout)
-        settings_tab_layout.addWidget(kie_group)
+        settings_tab_layout.addWidget(kie_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         process_settings_group = QGroupBox("Обработка через KIE")
+        process_settings_group.setMaximumWidth(720)
         process_settings_layout = QGridLayout()
+        process_settings_layout.setHorizontalSpacing(6)
+        process_settings_layout.setVerticalSpacing(6)
 
         self.kie_upscale_model_combo = QComboBox()
         self.kie_upscale_model_combo.addItems(["topaz/upscale", "recraft/crisp-upscale"])
@@ -1025,18 +1018,32 @@ class MainWindow(QMainWindow):
         self.upscale_factor_combo.addItems(["2", "3", "4"])
         self.upscale_factor_combo.setCurrentText(str(self.config.get("upscale_factor", 4)))
         self.upscale_target_size_input = QLineEdit(str(self.config.get("upscale_target_size", "")))
-        self.upscale_target_size_input.setPlaceholderText("Опционально, например 3000")
+        self.upscale_target_size_input.setPlaceholderText("например 3000")
 
-        process_settings_layout.addWidget(QLabel("Модель апскейла:"), 0, 0)
+        self.kie_upscale_model_combo.setFixedSize(settings_field_width, 32)
+        self.upscale_factor_combo.setFixedSize(settings_field_width, 32)
+        self.upscale_target_size_input.setFixedSize(settings_field_width, 32)
+        self.kie_remove_bg_model_combo.setFixedSize(settings_field_width, 32)
+
+        lbl_upscale_model = QLabel("Апскейл модель:")
+        lbl_upscale_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_upscale_factor = QLabel("Кратность:")
+        lbl_upscale_factor.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_max_side = QLabel("Макс. сторона (px):")
+        lbl_max_side.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_remove_bg = QLabel("Удаление фона:")
+        lbl_remove_bg.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        process_settings_layout.addWidget(lbl_upscale_model, 0, 0)
         process_settings_layout.addWidget(self.kie_upscale_model_combo, 0, 1)
-        process_settings_layout.addWidget(QLabel("Кратность апскейла:"), 1, 0)
+        process_settings_layout.addWidget(lbl_upscale_factor, 1, 0)
         process_settings_layout.addWidget(self.upscale_factor_combo, 1, 1)
-        process_settings_layout.addWidget(QLabel("Максимальная сторона (px):"), 2, 0)
+        process_settings_layout.addWidget(lbl_max_side, 2, 0)
         process_settings_layout.addWidget(self.upscale_target_size_input, 2, 1)
-        process_settings_layout.addWidget(QLabel("Модель удаления фона:"), 3, 0)
+        process_settings_layout.addWidget(lbl_remove_bg, 3, 0)
         process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 3, 1)
         process_settings_group.setLayout(process_settings_layout)
-        settings_tab_layout.addWidget(process_settings_group)
+        settings_tab_layout.addWidget(process_settings_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         settings_tab_layout.addStretch()
 
@@ -1051,10 +1058,10 @@ class MainWindow(QMainWindow):
 
         run_layout = QHBoxLayout()
         self.btn_start = QPushButton("Start")
-        self.btn_start.setMinimumHeight(40)
+        self.btn_start.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_start.clicked.connect(self.start_work)
         self.btn_stop = QPushButton("Stop")
-        self.btn_stop.setMinimumHeight(40)
+        self.btn_stop.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_stop.clicked.connect(self.stop_work)
         self.btn_stop.setEnabled(False)
         self.btn_start.setStyleSheet(self.primary_button_style)
@@ -1140,12 +1147,8 @@ class MainWindow(QMainWindow):
 
     def setup_settings_autosave_connections(self):
         self.kie_api_key_input.textChanged.connect(self.schedule_settings_save)
-        self.kie_upload_path_input.textChanged.connect(self.schedule_settings_save)
         self.generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
-        self.retries.valueChanged.connect(self.schedule_settings_save)
-        self.timeout.valueChanged.connect(self.schedule_settings_save)
-        self.generation_wait_timeout.valueChanged.connect(self.schedule_settings_save)
         self.chk_upscale.toggled.connect(self.schedule_settings_save)
         self.chk_remove_bg.toggled.connect(self.schedule_settings_save)
         self.kie_upscale_model_combo.currentTextChanged.connect(self.schedule_settings_save)
@@ -1459,7 +1462,7 @@ class MainWindow(QMainWindow):
         elif raw_model in {"flux-kontext", "black-forest-labs/flux-kontext-pro", "black-forest-labs/flux-kontext-max"}:
             model = "flux-kontext"
 
-        timeout = max(10, int(self.timeout.value()))
+        timeout = max(10, int(self.config.get("timeout", 60)))
         prompt = "simple test image"
         ratio = self.generation_size_combo.currentText().strip() or "1:1"
         legacy_size = self._ratio_to_legacy_size_ui(ratio)
@@ -1650,11 +1653,7 @@ class MainWindow(QMainWindow):
         }.get(ratio, "1024x1024")
 
     def persist_ui_settings(self):
-        self.config["retries"] = self.retries.value()
-        self.config["timeout"] = self.timeout.value()
-        self.config["generation_wait_timeout"] = self.generation_wait_timeout.value()
         self.config["kie_api_key"] = self.kie_api_key_input.text().strip()
-        self.config["kie_upload_path"] = self.kie_upload_path_input.text().strip() or "clipart-generator"
         self.config["generation_model"] = self.generation_model_combo.currentText()
         self.config["generation_size"] = self.generation_size_combo.currentText()
         self.config["remove_bg"] = self.chk_remove_bg.isChecked()
