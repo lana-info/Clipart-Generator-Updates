@@ -43,7 +43,18 @@ from PyQt6.QtWidgets import (
 
 APP_VERSION = "0.1.0"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
-PROMPTS_STORAGE_FILE = "prompts.json"
+
+
+def get_user_data_dir():
+    base_dir = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    user_data_dir = os.path.join(base_dir, "Clipart Generator")
+    os.makedirs(user_data_dir, exist_ok=True)
+    return user_data_dir
+
+
+USER_DATA_DIR = get_user_data_dir()
+CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
+PROMPTS_STORAGE_FILE = os.path.join(USER_DATA_DIR, "prompts.json")
 
 
 class WorkerThread(QThread):
@@ -671,8 +682,7 @@ class MainWindow(QMainWindow):
         self.settings_save_timer.setSingleShot(True)
         self.settings_save_timer.setInterval(400)
         self.settings_save_timer.timeout.connect(self.persist_ui_settings)
-        self.started_at = time.time()
-        self.startup_minimize_guard_seconds = 180
+        self.ignore_minimize_until = 0.0
 
         self.load_config()
         self.setup_ui()
@@ -733,8 +743,9 @@ class MainWindow(QMainWindow):
             "prompt_input_mode": "list",
             "last_work_dir": "",
         }
-        if os.path.exists("config.json"):
-            with open("config.json", "r", encoding="utf-8") as f:
+        self._migrate_legacy_local_files()
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 self.config = json.load(f)
             for key, value in default_config.items():
                 if key not in self.config:
@@ -745,8 +756,21 @@ class MainWindow(QMainWindow):
         self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
 
     def save_config(self):
-        with open("config.json", "w", encoding="utf-8") as f:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
+
+    def _migrate_legacy_local_files(self):
+        try:
+            legacy_config = os.path.join(os.getcwd(), "config.json")
+            legacy_prompts = os.path.join(os.getcwd(), "prompts.json")
+            if os.path.exists(legacy_config) and not os.path.exists(CONFIG_FILE):
+                with open(legacy_config, "r", encoding="utf-8") as src, open(CONFIG_FILE, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+            if os.path.exists(legacy_prompts) and not os.path.exists(PROMPTS_STORAGE_FILE):
+                with open(legacy_prompts, "r", encoding="utf-8") as src, open(PROMPTS_STORAGE_FILE, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+        except Exception:
+            pass
 
     def setup_ui(self):
         central = QWidget()
@@ -1626,13 +1650,13 @@ class MainWindow(QMainWindow):
         if not self.isMinimized():
             return
 
-        elapsed = time.time() - self.started_at
-        if elapsed > self.startup_minimize_guard_seconds:
+        if time.time() < self.ignore_minimize_until:
             return
 
         QTimer.singleShot(80, self._restore_from_minimized_state)
 
     def _restore_from_minimized_state(self):
+        self.ignore_minimize_until = time.time() + 1.0
         if self.isMinimized():
             self.showNormal()
         if not self.isVisible():
