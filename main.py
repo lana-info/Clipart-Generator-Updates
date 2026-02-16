@@ -74,7 +74,6 @@ class WorkerThread(QThread):
         self.kie_upscale_model = settings.get("kie_upscale_model", "topaz/upscale")
         self.kie_remove_bg_model = settings.get("kie_remove_bg_model", "recraft/remove-background")
         self.upscale_factor = int(settings.get("upscale_factor", 4) or 4)
-        self.upscale_target_size = str(settings.get("upscale_target_size", "")).strip()
 
     def run(self):
         try:
@@ -195,14 +194,8 @@ class WorkerThread(QThread):
 
         if self.upscale:
             self.progress.emit(f"  Апскейл через {self.kie_upscale_model}...")
-            upscale_input = {}
-            max_side = self._parse_max_side(self.upscale_target_size)
-            target_size = self._calculate_target_size(source_image_path, max_side)
-            if target_size:
-                upscale_input["size"] = target_size
-                self.progress.emit(f"  Целевой размер по максимальной стороне: {target_size}")
-            elif self.upscale_factor in {2, 3, 4}:
-                upscale_input["scale"] = self.upscale_factor
+            upscale_input = {"scale": self.upscale_factor if self.upscale_factor in {2, 3, 4} else 4}
+            self.progress.emit(f"  Кратность апскейла: {upscale_input['scale']}x")
             pipeline_url = self._kie_run_model_task(self.kie_upscale_model, pipeline_url, extra_input=upscale_input)
             upscaled_path = os.path.join(raw_dir, f"{prefix}_upscaled_{idx:03d}.png")
             self._download_file(pipeline_url, upscaled_path)
@@ -216,39 +209,6 @@ class WorkerThread(QThread):
             self.progress.emit(f"  Промежуточный без фона: {nobg_path}")
 
         return pipeline_url
-
-    def _parse_max_side(self, raw_value):
-        text = str(raw_value or "").strip().lower()
-        if not text:
-            return 0
-        if text.isdigit():
-            return max(0, int(text))
-        numbers = [int(x) for x in re.findall(r"\d+", text)]
-        if not numbers:
-            return 0
-        return max(numbers)
-
-    def _calculate_target_size(self, image_path, max_side):
-        if max_side <= 0:
-            return ""
-        try:
-            with Image.open(image_path) as img:
-                width, height = img.size
-        except Exception as e:
-            self.progress.emit(f"  Не удалось прочитать размер изображения: {e}")
-            return ""
-
-        if width <= 0 or height <= 0:
-            return ""
-
-        if width >= height:
-            new_width = max_side
-            new_height = max(1, int(round((height / width) * max_side)))
-        else:
-            new_height = max_side
-            new_width = max(1, int(round((width / height) * max_side)))
-
-        return f"{new_width}x{new_height}"
 
     def _kie_headers(self):
         return {
@@ -714,6 +674,7 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
+        self.restore_last_work_dir()
         self.load_saved_prompts()
         self.setup_settings_autosave_connections()
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
@@ -764,11 +725,11 @@ class MainWindow(QMainWindow):
             "remove_bg": True,
             "upscale": True,
             "upscale_factor": 4,
-            "upscale_target_size": "",
             "kie_upscale_model": "topaz/upscale",
             "kie_remove_bg_model": "recraft/remove-background",
             "run_mode": "generate_only",
             "prompt_input_mode": "list",
+            "last_work_dir": "",
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
@@ -868,20 +829,15 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.tabs)
 
         prompt_btn_layout = QHBoxLayout()
-        self.btn_export = QPushButton("Экспорт промптов")
-        self.btn_export.clicked.connect(self.export_prompts)
         self.btn_add_prompt_row = QPushButton("+")
         self.btn_add_prompt_row.clicked.connect(self.add_prompt_row)
         self.btn_add_prompt_row.setToolTip("Добавить строку промпта")
         self.btn_clear_prompts = QPushButton("Удалить все")
         self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
-        self.btn_export.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_clear_prompts.setFixedSize(self.standard_button_width, self.standard_button_height)
-        self.btn_export.setStyleSheet(self.primary_button_style)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
-        prompt_btn_layout.addWidget(self.btn_export)
         prompt_btn_layout.addWidget(self.btn_add_prompt_row)
         prompt_btn_layout.addStretch()
         prompt_btn_layout.addWidget(self.btn_clear_prompts)
@@ -1017,20 +973,15 @@ class MainWindow(QMainWindow):
         self.upscale_factor_combo = QComboBox()
         self.upscale_factor_combo.addItems(["2", "3", "4"])
         self.upscale_factor_combo.setCurrentText(str(self.config.get("upscale_factor", 4)))
-        self.upscale_target_size_input = QLineEdit(str(self.config.get("upscale_target_size", "")))
-        self.upscale_target_size_input.setPlaceholderText("например 3000")
 
         self.kie_upscale_model_combo.setFixedSize(settings_field_width, 32)
         self.upscale_factor_combo.setFixedSize(settings_field_width, 32)
-        self.upscale_target_size_input.setFixedSize(settings_field_width, 32)
         self.kie_remove_bg_model_combo.setFixedSize(settings_field_width, 32)
 
         lbl_upscale_model = QLabel("Апскейл модель:")
         lbl_upscale_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lbl_upscale_factor = QLabel("Кратность:")
         lbl_upscale_factor.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_max_side = QLabel("Макс. сторона (px):")
-        lbl_max_side.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lbl_remove_bg = QLabel("Удаление фона:")
         lbl_remove_bg.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -1038,10 +989,8 @@ class MainWindow(QMainWindow):
         process_settings_layout.addWidget(self.kie_upscale_model_combo, 0, 1)
         process_settings_layout.addWidget(lbl_upscale_factor, 1, 0)
         process_settings_layout.addWidget(self.upscale_factor_combo, 1, 1)
-        process_settings_layout.addWidget(lbl_max_side, 2, 0)
-        process_settings_layout.addWidget(self.upscale_target_size_input, 2, 1)
-        process_settings_layout.addWidget(lbl_remove_bg, 3, 0)
-        process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 3, 1)
+        process_settings_layout.addWidget(lbl_remove_bg, 2, 0)
+        process_settings_layout.addWidget(self.kie_remove_bg_model_combo, 2, 1)
         process_settings_group.setLayout(process_settings_layout)
         settings_tab_layout.addWidget(process_settings_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -1154,7 +1103,6 @@ class MainWindow(QMainWindow):
         self.kie_upscale_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.kie_remove_bg_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.upscale_factor_combo.currentTextChanged.connect(self.schedule_settings_save)
-        self.upscale_target_size_input.textChanged.connect(self.schedule_settings_save)
         self.radio_run_generate.toggled.connect(self.schedule_settings_save)
         self.radio_run_process.toggled.connect(self.schedule_settings_save)
         self.radio_run_both.toggled.connect(self.schedule_settings_save)
@@ -1174,7 +1122,18 @@ class MainWindow(QMainWindow):
             self.lbl_work_dir.setText(f"Рабочая папка: {path}")
             os.makedirs(os.path.join(path, "raw"), exist_ok=True)
             os.makedirs(os.path.join(path, "output"), exist_ok=True)
+            self.config["last_work_dir"] = path
+            self.save_config()
             self.log(f"Созданы/проверены папки raw и output в {path}")
+
+    def restore_last_work_dir(self):
+        last_work_dir = str(self.config.get("last_work_dir", "")).strip()
+        if not last_work_dir or not os.path.isdir(last_work_dir):
+            return
+        self.work_dir = last_work_dir
+        self.lbl_work_dir.setText(f"Рабочая папка: {last_work_dir}")
+        os.makedirs(os.path.join(last_work_dir, "raw"), exist_ok=True)
+        os.makedirs(os.path.join(last_work_dir, "output"), exist_ok=True)
 
     def select_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -1456,16 +1415,8 @@ class MainWindow(QMainWindow):
             return
 
         raw_model = self.generation_model_combo.currentText().strip()
-        model = raw_model
-        if raw_model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
-            model = "gpt4o-image"
-        elif raw_model in {"flux-kontext", "black-forest-labs/flux-kontext-pro", "black-forest-labs/flux-kontext-max"}:
-            model = "flux-kontext"
-
         timeout = max(10, int(self.config.get("timeout", 60)))
-        prompt = "simple test image"
         ratio = self.generation_size_combo.currentText().strip() or "1:1"
-        legacy_size = self._ratio_to_legacy_size_ui(ratio)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -1473,46 +1424,16 @@ class MainWindow(QMainWindow):
         }
 
         try:
-            if model == "gpt4o-image":
-                url = "https://api.kie.ai/api/v1/gpt4o-image/generate"
-                payload_variants = [
-                    {"prompt": prompt, "size": legacy_size},
-                    {"prompt": prompt, "size": ratio},
-                    {"prompt": prompt, "aspectRatio": ratio},
-                    {"prompt": prompt, "aspect_ratio": ratio},
-                ]
-            else:
-                url = "https://api.kie.ai/api/v1/jobs/createTask"
-                if model == "flux-kontext":
-                    test_model = "black-forest-labs/flux-kontext-pro"
-                elif model == "z-image":
-                    test_model = "z-image"
-                else:
-                    test_model = raw_model
-                payload_variants = [
-                    {"model": test_model, "input": {"prompt": prompt, "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "aspectRatio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "aspect_ratio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
-                ]
+            model_ok, model_msg, _ = self._probe_model_with_ratio(raw_model, "1:1", headers, timeout)
+            if not model_ok:
+                raise RuntimeError(f"Недоступна модель: {raw_model}. {model_msg}")
 
-            data = None
-            last_error = None
-            for payload in payload_variants:
-                try:
-                    req = request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                    with request.urlopen(req, timeout=timeout) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                    if int(data.get("code", 0)) == 200:
-                        break
-                    last_error = data.get("msg") or "Модель недоступна"
-                except Exception as e:
-                    last_error = str(e)
+            ratio_ok, ratio_msg, task_id = self._probe_model_with_ratio(raw_model, ratio, headers, timeout)
+            if not ratio_ok:
+                raise RuntimeError(
+                    f"Недоступно соотношение {ratio} для модели {raw_model}. {ratio_msg}"
+                )
 
-            if data is None or int(data.get("code", 0)) != 200:
-                raise RuntimeError(last_error or "Модель недоступна")
-
-            task_id = (data.get("data") or {}).get("taskId", "-")
             self.log(f"Проверка модели '{raw_model}' успешна. Task ID: {task_id}")
             QMessageBox.information(self, "Проверка модели", f"Модель доступна: {raw_model}")
         except urlerror.HTTPError as e:
@@ -1529,6 +1450,54 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"Проверка модели '{raw_model}' не пройдена: {e}")
             QMessageBox.warning(self, "Проверка модели", f"Ошибка проверки: {e}")
+
+    def _probe_model_with_ratio(self, raw_model, ratio, headers, timeout):
+        prompt = "simple test image"
+        legacy_size = self._ratio_to_legacy_size_ui(ratio)
+
+        model = raw_model
+        if raw_model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
+            model = "gpt4o-image"
+        elif raw_model in {"flux-kontext", "black-forest-labs/flux-kontext-pro", "black-forest-labs/flux-kontext-max"}:
+            model = "flux-kontext"
+
+        if model == "gpt4o-image":
+            url = "https://api.kie.ai/api/v1/gpt4o-image/generate"
+            payload_variants = [
+                {"prompt": prompt, "size": legacy_size},
+                {"prompt": prompt, "size": ratio},
+                {"prompt": prompt, "aspectRatio": ratio},
+                {"prompt": prompt, "aspect_ratio": ratio},
+            ]
+        else:
+            url = "https://api.kie.ai/api/v1/jobs/createTask"
+            if model == "flux-kontext":
+                test_model = "black-forest-labs/flux-kontext-pro"
+            elif model == "z-image":
+                test_model = "z-image"
+            else:
+                test_model = raw_model
+            payload_variants = [
+                {"model": test_model, "input": {"prompt": prompt, "size": ratio}},
+                {"model": test_model, "input": {"prompt": prompt, "aspectRatio": ratio}},
+                {"model": test_model, "input": {"prompt": prompt, "aspect_ratio": ratio}},
+                {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
+            ]
+
+        last_error = "Не удалось выполнить проверку"
+        for payload in payload_variants:
+            try:
+                req = request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                with request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if int(data.get("code", 0)) == 200:
+                    task_id = (data.get("data") or {}).get("taskId", "-")
+                    return True, "OK", task_id
+                last_error = data.get("msg") or "Проверка не пройдена"
+            except Exception as e:
+                last_error = str(e)
+
+        return False, last_error, "-"
 
     def _parse_version_tuple(self, version_text):
         parts = str(version_text or "0.0.0").strip().split(".")
@@ -1659,7 +1628,6 @@ class MainWindow(QMainWindow):
         self.config["remove_bg"] = self.chk_remove_bg.isChecked()
         self.config["upscale"] = self.chk_upscale.isChecked()
         self.config["upscale_factor"] = int(self.upscale_factor_combo.currentText())
-        self.config["upscale_target_size"] = self.upscale_target_size_input.text().strip()
         self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
         self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
         self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
