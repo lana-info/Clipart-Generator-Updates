@@ -7,11 +7,17 @@ import tempfile
 import hashlib
 import mimetypes
 import re
+import ssl
 from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
 from datetime import datetime
 from PIL import Image
+
+try:
+    import certifi
+except Exception:
+    certifi = None
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
 from PyQt6.QtGui import QKeySequence
@@ -55,6 +61,16 @@ def get_user_data_dir():
 USER_DATA_DIR = get_user_data_dir()
 CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
 PROMPTS_STORAGE_FILE = os.path.join(USER_DATA_DIR, "prompts.json")
+
+
+def build_ssl_context():
+    """Создаёт SSL-контекст с системными сертификатами и fallback на certifi."""
+    if certifi is not None:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    return ssl.create_default_context()
 
 
 class WorkerThread(QThread):
@@ -231,9 +247,10 @@ class WorkerThread(QThread):
     def _request_with_retries(self, req, timeout=None):
         req_timeout = timeout or self.timeout
         last_error = None
+        ssl_context = build_ssl_context()
         for attempt in range(self.retries + 1):
             try:
-                with request.urlopen(req, timeout=req_timeout) as resp:
+                with request.urlopen(req, timeout=req_timeout, context=ssl_context) as resp:
                     return resp.read()
             except urlerror.HTTPError as e:
                 response_body = ""
@@ -1556,7 +1573,7 @@ class MainWindow(QMainWindow):
             },
             method="GET",
         )
-        with request.urlopen(req, timeout=120) as resp:
+        with request.urlopen(req, timeout=120, context=build_ssl_context()) as resp:
             content = resp.read()
 
         temp_dir = tempfile.gettempdir()
@@ -1597,7 +1614,7 @@ class MainWindow(QMainWindow):
                 },
                 method="GET",
             )
-            with request.urlopen(req, timeout=20) as resp:
+            with request.urlopen(req, timeout=20, context=build_ssl_context()) as resp:
                 # Поддержка BOM в JSON (например, если version.json сохранён PowerShell с UTF-8 BOM).
                 manifest = json.loads(resp.read().decode("utf-8-sig"))
 
@@ -1639,6 +1656,11 @@ class MainWindow(QMainWindow):
                 reason = getattr(e, "reason", None)
                 if reason is not None and ("11001" in str(reason) or "getaddrinfo" in str(reason).lower()):
                     human_error = "Нет доступа к сети или DNS не может разрешить адрес сервера обновлений"
+                elif reason is not None and "certificate_verify_failed" in str(reason).lower():
+                    human_error = (
+                        "Не удалось проверить SSL-сертификат. Проверьте дату/время Windows, "
+                        "обновления корневых сертификатов и доступ к github.com"
+                    )
             self.log(f"Проверка обновлений: {human_error}")
             if not silent:
                 QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {human_error}")
