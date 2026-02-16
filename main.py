@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
 
 APP_VERSION = "0.1.0"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
+PROMPTS_STORAGE_FILE = "prompts.json"
 
 
 class WorkerThread(QThread):
@@ -713,8 +714,41 @@ class MainWindow(QMainWindow):
 
         self.load_config()
         self.setup_ui()
+        self.load_saved_prompts()
         self.setup_settings_autosave_connections()
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
+
+    def load_saved_prompts(self):
+        try:
+            if not os.path.exists(PROMPTS_STORAGE_FILE):
+                return
+            with open(PROMPTS_STORAGE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            prompts = []
+            if isinstance(data, dict):
+                raw_prompts = data.get("prompts", [])
+                if isinstance(raw_prompts, list):
+                    prompts = [str(p).strip() for p in raw_prompts if str(p).strip()]
+            elif isinstance(data, list):
+                prompts = [str(p).strip() for p in data if str(p).strip()]
+
+            self.generated_prompts = prompts
+            if hasattr(self, "table"):
+                self.refresh_prompts_table()
+        except Exception as e:
+            self.log(f"Не удалось загрузить сохранённые промпты: {e}")
+
+    def save_prompts_storage(self):
+        try:
+            payload = {
+                "prompts": [p.strip() for p in self.generated_prompts if p.strip()],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            with open(PROMPTS_STORAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.log(f"Не удалось сохранить промпты: {e}")
 
     def load_config(self):
         default_config = {
@@ -825,70 +859,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(settings_tab, "Настройки")
         main_layout.addWidget(self.tabs)
 
-        prompt_mode_group = QGroupBox("Режим ввода промптов")
-        prompt_mode_layout = QHBoxLayout()
-        self.prompt_input_mode_group = QButtonGroup()
-        self.radio_prompt_list = QRadioButton("Список промптов")
-        self.radio_prompt_template = QRadioButton("Шаблон (A/B/C)")
-        self.prompt_input_mode_group.addButton(self.radio_prompt_list, 1)
-        self.prompt_input_mode_group.addButton(self.radio_prompt_template, 2)
-        self.radio_prompt_template.toggled.connect(self.on_prompt_input_mode_changed)
-        self.radio_prompt_list.toggled.connect(self.on_prompt_input_mode_changed)
-        prompt_mode_layout.addWidget(self.radio_prompt_list)
-        prompt_mode_layout.addWidget(self.radio_prompt_template)
-        prompt_mode_layout.addStretch()
-        prompt_mode_group.setLayout(prompt_mode_layout)
-        prompt_tab_layout.addWidget(prompt_mode_group)
-
-        self.template_prompt_group = QGroupBox("Master Prompt (шаблон с {A}, {B}, {C})")
-        prompt_layout = QVBoxLayout()
-        prompt_layout.setSpacing(6)
-        self.master_prompt = QTextEdit()
-        self.master_prompt.setPlaceholderText("Введите шаблон промпта. Используйте {A}, {B}, {C}.")
-        self.master_prompt.setMinimumHeight(80)
-        prompt_layout.addWidget(self.master_prompt)
-
-        add_values_layout = QHBoxLayout()
-        add_values_layout.addWidget(QLabel("Добавить значение:"))
-        self.btn_add_a = QPushButton("+A")
-        self.btn_add_b = QPushButton("+B")
-        self.btn_add_c = QPushButton("+C")
-        self.btn_add_a.setFixedSize(34, 24)
-        self.btn_add_b.setFixedSize(34, 24)
-        self.btn_add_c.setFixedSize(34, 24)
-        compact_add_style = (
-            "QPushButton {background:#14b8a6; color:white; font-weight:700; border-radius:6px; padding:0px;}"
-            "QPushButton:hover {background:#0f9f90;}"
-            "QPushButton:disabled {background:#9ca3af; color:white;}"
-        )
-        self.btn_add_a.setStyleSheet(compact_add_style)
-        self.btn_add_b.setStyleSheet(compact_add_style)
-        self.btn_add_c.setStyleSheet(compact_add_style)
-        add_values_layout.addWidget(self.btn_add_a)
-        add_values_layout.addWidget(self.btn_add_b)
-        add_values_layout.addWidget(self.btn_add_c)
-        add_values_layout.addStretch()
-        prompt_layout.addLayout(add_values_layout)
-
-        fields_layout = QHBoxLayout()
-        fields_layout.setSpacing(6)
-        self.field_a = self.create_template_values_table("A")
-        self.field_b = self.create_template_values_table("B")
-        self.field_c = self.create_template_values_table("C")
-        self.btn_add_a.clicked.connect(lambda: self.add_template_value_row(self.field_a))
-        self.btn_add_b.clicked.connect(lambda: self.add_template_value_row(self.field_b))
-        self.btn_add_c.clicked.connect(lambda: self.add_template_value_row(self.field_c))
-        fields_layout.addWidget(self.create_template_column("A", self.field_a))
-        fields_layout.addWidget(self.create_template_column("B", self.field_b))
-        fields_layout.addWidget(self.create_template_column("C", self.field_c))
-        prompt_layout.addLayout(fields_layout)
-        self.template_prompt_group.setLayout(prompt_layout)
-        prompt_tab_layout.addWidget(self.template_prompt_group)
-
         prompt_btn_layout = QHBoxLayout()
-        self.btn_build = QPushButton("Создать промпты")
-        self.btn_build.clicked.connect(self.build_prompts)
-        self.btn_build.setToolTip("Создаёт промпты по шаблону с {A}, {B}, {C}")
         self.btn_export = QPushButton("Экспорт промптов")
         self.btn_export.clicked.connect(self.export_prompts)
         self.btn_add_prompt_row = QPushButton("+")
@@ -897,23 +868,14 @@ class MainWindow(QMainWindow):
         self.btn_clear_prompts = QPushButton("Удалить все")
         self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
-        self.btn_build.setStyleSheet(self.primary_button_style)
         self.btn_export.setStyleSheet(self.primary_button_style)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
-        prompt_btn_layout.addWidget(self.btn_build)
         prompt_btn_layout.addWidget(self.btn_export)
         prompt_btn_layout.addWidget(self.btn_add_prompt_row)
         prompt_btn_layout.addStretch()
         prompt_btn_layout.addWidget(self.btn_clear_prompts)
         prompt_tab_layout.addLayout(prompt_btn_layout)
-
-        prompt_mode = str(self.config.get("prompt_input_mode", "list"))
-        if prompt_mode == "template":
-            self.radio_prompt_template.setChecked(True)
-        else:
-            self.radio_prompt_list.setChecked(True)
-        self.on_prompt_input_mode_changed(True)
 
         preview_group = QGroupBox("Список промптов")
         preview_layout = QVBoxLayout()
@@ -1105,7 +1067,8 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.progress_bar)
         log_layout.addLayout(run_layout)
         log_group.setLayout(log_layout)
-        log_group.setFixedHeight(170)
+        log_group.setMinimumHeight(220)
+        log_group.setMaximumHeight(260)
         main_layout.setStretch(2, 1)
         main_layout.setStretch(3, 0)
         main_layout.addWidget(log_group)
@@ -1192,8 +1155,6 @@ class MainWindow(QMainWindow):
         self.radio_run_generate.toggled.connect(self.schedule_settings_save)
         self.radio_run_process.toggled.connect(self.schedule_settings_save)
         self.radio_run_both.toggled.connect(self.schedule_settings_save)
-        self.radio_prompt_template.toggled.connect(self.schedule_settings_save)
-        self.radio_prompt_list.toggled.connect(self.schedule_settings_save)
 
     def schedule_settings_save(self, *_):
         self.settings_save_timer.start()
@@ -1224,23 +1185,10 @@ class MainWindow(QMainWindow):
             self.lbl_files_count.setText(f"Выбрано файлов: {len(files)}")
             self.log(f"Выбрано файлов: {len(files)}")
 
-    def on_prompt_input_mode_changed(self, checked):
-        current_size = self.size()
-        is_template = self.radio_prompt_template.isChecked()
-        self.template_prompt_group.setVisible(is_template)
-        self.btn_build.setVisible(is_template)
-        self.btn_export.setVisible(is_template)
-        self.btn_add_prompt_row.setVisible(not is_template)
-        if hasattr(self, "table"):
-            self.table.setMinimumHeight(180 if is_template else 280)
-            self.refresh_prompts_table()
-        self.resize(current_size)
-
     def add_prompt_row(self):
-        if not self.radio_prompt_list.isChecked():
-            return
         self.generated_prompts.append("")
         self.refresh_prompts_table()
+        self.save_prompts_storage()
         row_index = len(self.generated_prompts) - 1
         self.table.setCurrentCell(row_index, 0)
         self.table.editItem(self.table.item(row_index, 0))
@@ -1323,11 +1271,10 @@ class MainWindow(QMainWindow):
         self.log(f"Импортировано промптов: {len(self.generated_prompts)}")
 
     def on_table_bulk_paste(self, raw_text):
-        if not self.radio_prompt_list.isChecked():
-            return
         prompts = self._split_prompts_text(raw_text)
         self.generated_prompts = prompts
         self.refresh_prompts_table()
+        self.save_prompts_storage()
         self.log(f"Вставлено промптов: {len(self.generated_prompts)}")
 
     def _split_prompts_text(self, raw_text):
@@ -1362,8 +1309,6 @@ class MainWindow(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
             item = QTableWidgetItem(prompt)
-            if not self.radio_prompt_list.isChecked():
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 0, item)
 
             delete_btn = QPushButton("🗑")
@@ -1376,22 +1321,25 @@ class MainWindow(QMainWindow):
     def on_prompt_item_changed(self, item):
         if self.is_updating_prompts_table:
             return
-        if not self.radio_prompt_list.isChecked() or item.column() != 0:
+        if item.column() != 0:
             return
         row = item.row()
         if 0 <= row < len(self.generated_prompts):
             self.generated_prompts[row] = item.text()
+            self.save_prompts_storage()
 
     def remove_prompt_row(self, row_index):
         if row_index < 0 or row_index >= len(self.generated_prompts):
             return
         del self.generated_prompts[row_index]
         self.refresh_prompts_table()
+        self.save_prompts_storage()
         self.log(f"Удалён промпт. Осталось: {len(self.generated_prompts)}")
 
     def clear_all_prompts(self):
         self.generated_prompts = []
         self.refresh_prompts_table()
+        self.save_prompts_storage()
         self.log("Список промптов очищен")
 
     def export_prompts(self):
@@ -1429,16 +1377,10 @@ class MainWindow(QMainWindow):
         runtime_settings = dict(self.config)
         runtime_settings["kie_api_key"] = current_api_key
 
-        if self.radio_prompt_template.isChecked():
-            active_prompts = self.build_prompts_from_template_inputs()
-            if not active_prompts:
-                QMessageBox.warning(self, "Ошибка", "Для шаблона заполните Master Prompt")
-                return
-        else:
-            active_prompts = self.get_list_mode_prompts()
-            if not active_prompts:
-                QMessageBox.warning(self, "Ошибка", "Для списка добавьте хотя бы один промпт")
-                return
+        active_prompts = self.get_list_mode_prompts()
+        if not active_prompts:
+            QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
+            return
 
         self.generated_prompts = active_prompts
         self.refresh_prompts_table()
@@ -1722,7 +1664,7 @@ class MainWindow(QMainWindow):
         self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
         self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
         self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
-        self.config["prompt_input_mode"] = "template" if self.radio_prompt_template.isChecked() else "list"
+        self.config["prompt_input_mode"] = "list"
         if self.radio_run_process.isChecked():
             self.config["run_mode"] = "process_only"
         elif self.radio_run_both.isChecked():
@@ -1735,6 +1677,7 @@ class MainWindow(QMainWindow):
         try:
             self.settings_save_timer.stop()
             self.persist_ui_settings()
+            self.save_prompts_storage()
         except Exception:
             pass
         super().closeEvent(event)
