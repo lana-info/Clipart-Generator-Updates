@@ -13,7 +13,7 @@ from urllib import request, parse
 from datetime import datetime
 from PIL import Image
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -671,6 +671,8 @@ class MainWindow(QMainWindow):
         self.settings_save_timer.setSingleShot(True)
         self.settings_save_timer.setInterval(400)
         self.settings_save_timer.timeout.connect(self.persist_ui_settings)
+        self.started_at = time.time()
+        self.startup_minimize_guard_seconds = 180
 
         self.load_config()
         self.setup_ui()
@@ -1608,9 +1610,35 @@ class MainWindow(QMainWindow):
             )
             QApplication.instance().quit()
         except Exception as e:
-            self.log(f"Проверка обновлений: {e}")
+            human_error = str(e)
+            if isinstance(e, urlerror.URLError):
+                reason = getattr(e, "reason", None)
+                if reason is not None and ("11001" in str(reason) or "getaddrinfo" in str(reason).lower()):
+                    human_error = "Нет доступа к сети или DNS не может разрешить адрес сервера обновлений"
+            self.log(f"Проверка обновлений: {human_error}")
             if not silent:
-                QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {e}")
+                QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {human_error}")
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if not self.isMinimized():
+            return
+
+        elapsed = time.time() - self.started_at
+        if elapsed > self.startup_minimize_guard_seconds:
+            return
+
+        QTimer.singleShot(80, self._restore_from_minimized_state)
+
+    def _restore_from_minimized_state(self):
+        if self.isMinimized():
+            self.showNormal()
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _ratio_to_legacy_size_ui(self, ratio):
         return {
