@@ -47,7 +47,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
 
@@ -773,6 +773,9 @@ class MainWindow(QMainWindow):
             self.config = default_config
         # URL обновлений всегда фиксированный и не редактируется в UI.
         self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
+        # Текущая версия приложения берётся из кода сборки, а не из пользовательского конфига.
+        # Это предотвращает цикл обновлений, если в конфиге осталось старое значение.
+        self.config["app_version"] = APP_VERSION
 
     def save_config(self):
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -1635,7 +1638,8 @@ class MainWindow(QMainWindow):
             if not latest_version or not download_url:
                 raise RuntimeError("version.json не содержит latest_version/download_url")
 
-            current_version = str(self.config.get("app_version", APP_VERSION)).strip()
+            # Источник истины о текущей версии — константа приложения из текущей сборки.
+            current_version = APP_VERSION
             if not self._is_newer_version(latest_version, current_version):
                 if not silent:
                     QMessageBox.information(self, "Обновления", f"У вас актуальная версия: {current_version}")
