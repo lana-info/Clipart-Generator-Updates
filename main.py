@@ -1199,6 +1199,9 @@ class MainWindow(QMainWindow):
         self.table.editItem(self.table.item(row_index, 0))
 
     def build_prompts(self):
+        if not hasattr(self, "master_prompt"):
+            self.log("Шаблонный режим промптов отключён в текущем интерфейсе")
+            return
         template = self.master_prompt.toPlainText().strip()
         a = self.get_template_values(self.field_a)
         b = self.get_template_values(self.field_b)
@@ -1227,6 +1230,8 @@ class MainWindow(QMainWindow):
         self.log(f"Создано промптов: {len(self.generated_prompts)}")
 
     def build_prompts_from_template_inputs(self):
+        if not hasattr(self, "master_prompt"):
+            return []
         template = self.master_prompt.toPlainText().strip()
         if not template:
             return []
@@ -1261,6 +1266,9 @@ class MainWindow(QMainWindow):
         return prompts
 
     def import_prompts_from_template(self):
+        if not hasattr(self, "master_prompt"):
+            QMessageBox.warning(self, "Ошибка", "Шаблонный режим промптов недоступен")
+            return
         raw_text = self.master_prompt.toPlainText().strip()
         if not raw_text:
             QMessageBox.warning(self, "Ошибка", "Вставьте список промптов в поле Master Prompt")
@@ -1531,7 +1539,7 @@ class MainWindow(QMainWindow):
         for payload in payload_variants:
             try:
                 req = request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                with request.urlopen(req, timeout=timeout) as resp:
+                with request.urlopen(req, timeout=timeout, context=build_ssl_context()) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 if int(data.get("code", 0)) == 200:
                     task_id = (data.get("data") or {}).get("taskId", "-")
