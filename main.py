@@ -95,6 +95,7 @@ class WorkerThread(QThread):
         self.timeout = max(10, int(settings.get("timeout", 60)))
         self.retries = max(0, int(settings.get("retries", 3)))
         self.generation_wait_timeout = max(120, int(settings.get("generation_wait_timeout", 300)))
+        self.status_poll_interval = max(5.0, min(60.0, float(settings.get("status_poll_interval", 20))))
 
         self.upscale = settings.get("upscale", True)
         self.remove_bg = settings.get("remove_bg", True)
@@ -582,7 +583,7 @@ class WorkerThread(QThread):
                 raise RuntimeError("4o Image не вернул resultUrls")
             if status in {"FAILED", "FAIL", "ERROR"}:
                 raise RuntimeError(data.get("errorMessage") or "4o Image вернул ошибку")
-            time.sleep(2)
+            time.sleep(self.status_poll_interval)
         raise TimeoutError("Превышено время ожидания 4o Image")
 
     def _kie_wait_result(self, task_id):
@@ -605,7 +606,7 @@ class WorkerThread(QThread):
                 return self._extract_result_url(data.get("resultJson"))
             if state in {"fail", "failed", "error"}:
                 raise RuntimeError(data.get("failMsg") or "KIE вернул fail")
-            time.sleep(2)
+            time.sleep(self.status_poll_interval)
         raise TimeoutError("Превышено время ожидания результата KIE")
 
     def _extract_result_url(self, result_json_raw):
@@ -745,6 +746,7 @@ class MainWindow(QMainWindow):
             "retries": 3,
             "timeout": 60,
             "generation_wait_timeout": 300,
+            "status_poll_interval": 20,
             "app_version": APP_VERSION,
             "update_manifest_url": UPDATE_MANIFEST_URL,
             "kie_api_key": "",
