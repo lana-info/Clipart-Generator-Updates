@@ -87,6 +87,7 @@ class WorkerThread(QThread):
         self.selected_files = selected_files or []
         self.generated_prompts = generated_prompts or []
         self.is_running = True
+        self.run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
         self.kie_api_key = settings.get("kie_api_key", "").strip()
         self.kie_upload_path = settings.get("kie_upload_path", "clipart-generator")
@@ -149,7 +150,7 @@ class WorkerThread(QThread):
             self.progress_value.emit(int(((idx - 1) / total) * 100))
             try:
                 image_url = self._kie_generate_image(prompt)
-                gen_path = os.path.join(raw_dir, f"gen_{idx:03d}.png")
+                gen_path = os.path.join(raw_dir, f"gen_{idx:03d}_{self.run_stamp}.png")
                 self._download_file(image_url, gen_path)
                 self.progress.emit(f"  Сгенерировано: {gen_path}")
 
@@ -159,7 +160,7 @@ class WorkerThread(QThread):
                     self.progress.emit("  Загружено в KIE")
                     final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "gen", gen_path)
 
-                out_path = os.path.join(output_dir, f"result_{idx:03d}.png")
+                out_path = os.path.join(output_dir, f"result_{idx:03d}_{self.run_stamp}.png")
                 self._download_file(final_url, out_path)
                 self.progress.emit(f"  Итог сохранён: {out_path}")
                 done += 1
@@ -206,7 +207,7 @@ class WorkerThread(QThread):
                 final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "file", file_path)
 
                 base = os.path.splitext(os.path.basename(file_path))[0]
-                out_path = os.path.join(output_dir, f"{base}_processed.png")
+                out_path = os.path.join(output_dir, f"{base}_processed_{self.run_stamp}.png")
                 self._download_file(final_url, out_path)
                 self.progress.emit(f"  Итог сохранён: {out_path}")
                 done += 1
@@ -222,21 +223,38 @@ class WorkerThread(QThread):
 
         if self.upscale:
             self.progress.emit(f"  Апскейл через {self.kie_upscale_model}...")
-            upscale_input = {"scale": self.upscale_factor if self.upscale_factor in {2, 3, 4} else 4}
-            self.progress.emit(f"  Кратность апскейла: {upscale_input['scale']}x")
+            upscale_factor = self._resolve_upscale_factor()
+            if self.kie_upscale_model == "topaz/upscale":
+                upscale_input = {
+                    "image_url": pipeline_url,
+                    "upscale_factor": str(upscale_factor),
+                }
+            elif self.kie_upscale_model == "recraft/crisp-upscale":
+                upscale_input = None
+            else:
+                upscale_input = {"scale": upscale_factor}
+            self.progress.emit(f"  Кратность апскейла: {upscale_factor}x")
             pipeline_url = self._kie_run_model_task(self.kie_upscale_model, pipeline_url, extra_input=upscale_input)
-            upscaled_path = os.path.join(raw_dir, f"{prefix}_upscaled_{idx:03d}.png")
+            upscaled_path = os.path.join(raw_dir, f"{prefix}_upscaled_{idx:03d}_{self.run_stamp}.png")
             self._download_file(pipeline_url, upscaled_path)
             self.progress.emit(f"  Промежуточный апскейл: {upscaled_path}")
 
         if self.remove_bg:
             self.progress.emit(f"  Удаление фона через {self.kie_remove_bg_model}...")
             pipeline_url = self._kie_run_model_task(self.kie_remove_bg_model, pipeline_url)
-            nobg_path = os.path.join(raw_dir, f"{prefix}_nobg_{idx:03d}.png")
+            nobg_path = os.path.join(raw_dir, f"{prefix}_nobg_{idx:03d}_{self.run_stamp}.png")
             self._download_file(pipeline_url, nobg_path)
             self.progress.emit(f"  Промежуточный без фона: {nobg_path}")
 
         return pipeline_url
+
+    def _resolve_upscale_factor(self):
+        model_name = (self.kie_upscale_model or "").strip()
+        if model_name == "recraft/crisp-upscale":
+            return 4
+        if model_name == "topaz/upscale":
+            return self.upscale_factor if self.upscale_factor in {2, 4, 8} else 4
+        return self.upscale_factor if self.upscale_factor in {2, 3, 4} else 4
 
     def _kie_headers(self):
         return {
@@ -402,7 +420,7 @@ class WorkerThread(QThread):
         return task_id
 
     def _kie_run_model_task(self, model, image_url, extra_input=None):
-        input_payload = {"image": image_url}
+        input_payload = {} if model == "topaz/upscale" else {"image": image_url}
         if isinstance(extra_input, dict):
             input_payload.update(extra_input)
         task_id = self._kie_create_task(model, input_payload)
@@ -688,18 +706,24 @@ class PromptTableWidget(QTableWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Clipart Generator")
+        self.setWindowTitle(f"Clipart Generator v{APP_VERSION}")
         self.resize(980, 780)
 
         self.work_dir = ""
         self.worker = None
         self.generated_prompts = []
         self.selected_files = []
+        self.has_generated_output_in_run = False
+        self.api_key_locked = True
         self.is_updating_prompts_table = False
         self.settings_save_timer = QTimer(self)
         self.settings_save_timer.setSingleShot(True)
         self.settings_save_timer.setInterval(400)
         self.settings_save_timer.timeout.connect(self.persist_ui_settings)
+        self.api_key_mask_timer = QTimer(self)
+        self.api_key_mask_timer.setSingleShot(True)
+        self.api_key_mask_timer.setInterval(2500)
+        self.api_key_mask_timer.timeout.connect(self.enforce_api_key_hidden)
         self.ignore_minimize_until = 0.0
 
         self.load_config()
@@ -942,10 +966,12 @@ class MainWindow(QMainWindow):
         self.kie_api_key_input = QLineEdit()
         self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.kie_api_key_input.setText(self.config.get("kie_api_key", ""))
-        self.btn_toggle_api_key = QPushButton("Показать")
-        self.btn_toggle_api_key.setFixedSize(self.standard_button_width, self.standard_button_height)
-        self.btn_toggle_api_key.setStyleSheet(self.compact_button_style)
-        self.btn_toggle_api_key.clicked.connect(self.toggle_api_key_visibility)
+        self.kie_api_key_input.setReadOnly(True)
+
+        self.btn_api_key_lock = QPushButton("🔒")
+        self.btn_api_key_lock.setFixedSize(40, 32)
+        self.btn_api_key_lock.setToolTip("Ключ заблокирован")
+        self.btn_api_key_lock.clicked.connect(self.toggle_api_key_lock)
 
         self.generation_model_combo = QComboBox()
         self.generation_model_combo.addItems([
@@ -991,7 +1017,7 @@ class MainWindow(QMainWindow):
 
         kie_layout.addWidget(lbl_api_key, 0, 0)
         kie_layout.addWidget(self.kie_api_key_input, 0, 1)
-        kie_layout.addWidget(self.btn_toggle_api_key, 0, 2)
+        kie_layout.addWidget(self.btn_api_key_lock, 0, 2)
         kie_layout.addWidget(lbl_gen_model, 1, 0)
         kie_layout.addWidget(self.generation_model_combo, 1, 1)
         kie_layout.addWidget(self.btn_check_model, 1, 2)
@@ -1019,7 +1045,7 @@ class MainWindow(QMainWindow):
         self.kie_remove_bg_model_combo.setCurrentIndex(ri_index if ri_index >= 0 else 0)
 
         self.upscale_factor_combo = QComboBox()
-        self.upscale_factor_combo.addItems(["2", "3", "4"])
+        self.upscale_factor_combo.addItems(["2", "4", "8"])
         self.upscale_factor_combo.setCurrentText(str(self.config.get("upscale_factor", 4)))
 
         self.kie_upscale_model_combo.setFixedSize(settings_field_width, 32)
@@ -1077,6 +1103,7 @@ class MainWindow(QMainWindow):
         main_layout.setStretch(3, 0)
         main_layout.addWidget(log_group)
 
+        self.refresh_upscale_factor_options()
         self.on_mode_changed(True)
 
     def create_template_values_table(self, placeholder_prefix):
@@ -1144,11 +1171,13 @@ class MainWindow(QMainWindow):
 
     def setup_settings_autosave_connections(self):
         self.kie_api_key_input.textChanged.connect(self.schedule_settings_save)
+        self.kie_api_key_input.textChanged.connect(self.on_api_key_changed)
         self.generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.chk_upscale.toggled.connect(self.schedule_settings_save)
         self.chk_remove_bg.toggled.connect(self.schedule_settings_save)
         self.kie_upscale_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.kie_upscale_model_combo.currentTextChanged.connect(self.on_upscale_model_changed)
         self.kie_remove_bg_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.upscale_factor_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.radio_run_generate.toggled.connect(self.schedule_settings_save)
@@ -1157,6 +1186,32 @@ class MainWindow(QMainWindow):
 
     def schedule_settings_save(self, *_):
         self.settings_save_timer.start()
+
+    def on_upscale_model_changed(self, *_):
+        self.refresh_upscale_factor_options()
+
+    def refresh_upscale_factor_options(self):
+        model_name = self.kie_upscale_model_combo.currentText().strip()
+        if model_name == "recraft/crisp-upscale":
+            factors = ["4"]
+        elif model_name == "topaz/upscale":
+            factors = ["2", "4", "8"]
+        else:
+            factors = ["2", "3", "4"]
+
+        current_factor = self.upscale_factor_combo.currentText().strip()
+        self.upscale_factor_combo.blockSignals(True)
+        self.upscale_factor_combo.clear()
+        self.upscale_factor_combo.addItems(factors)
+        if current_factor in factors:
+            self.upscale_factor_combo.setCurrentText(current_factor)
+        elif "4" in factors:
+            self.upscale_factor_combo.setCurrentText("4")
+        else:
+            self.upscale_factor_combo.setCurrentIndex(0)
+        self.upscale_factor_combo.setEnabled(model_name != "recraft/crisp-upscale")
+        self.upscale_factor_combo.blockSignals(False)
+        self.schedule_settings_save()
 
     def on_mode_changed(self, checked):
         is_process = self.radio_run_process.isChecked()
@@ -1394,14 +1449,7 @@ class MainWindow(QMainWindow):
 
         runtime_settings = dict(self.config)
         runtime_settings["kie_api_key"] = current_api_key
-
-        active_prompts = self.get_list_mode_prompts()
-        if not active_prompts:
-            QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
-            return
-
-        self.generated_prompts = active_prompts
-        self.refresh_prompts_table()
+        self.has_generated_output_in_run = False
 
         run_mode = self.config.get("run_mode", "generate_only")
 
@@ -1411,8 +1459,20 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Для режима обработки выберите файлы")
                 return
         elif run_mode == "both":
+            active_prompts = self.get_list_mode_prompts()
+            if not active_prompts:
+                QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
+                return
+            self.generated_prompts = active_prompts
+            self.refresh_prompts_table()
             mode = "mode_both"
         else:
+            active_prompts = self.get_list_mode_prompts()
+            if not active_prompts:
+                QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
+                return
+            self.generated_prompts = active_prompts
+            self.refresh_prompts_table()
             mode = "mode1_generate_only"
 
         self.worker = WorkerThread(
@@ -1439,12 +1499,54 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.log("Остановлено")
+        self.offer_open_output_folder_after_stop()
 
     def on_finished(self, message):
         self.log(message)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.progress_bar.setValue(100)
+        self.offer_open_output_folder(message)
+
+    def offer_open_output_folder(self, message):
+        if "Готово" not in (message or ""):
+            return
+        if not self.work_dir:
+            return
+        output_dir = os.path.join(self.work_dir, "output")
+        if not os.path.isdir(output_dir):
+            return
+        answer = QMessageBox.question(
+            self,
+            "Готово",
+            "Обработка завершена. Открыть папку с результатами?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                os.startfile(output_dir)
+            except Exception as e:
+                self.log(f"Не удалось открыть папку output: {e}")
+
+    def offer_open_output_folder_after_stop(self):
+        output_dir = os.path.join(self.work_dir, "output") if self.work_dir else ""
+        if not output_dir or not os.path.isdir(output_dir):
+            return
+        if not self.has_generated_output_in_run:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Остановка",
+            "Остановка выполнена. Открыть папку с уже готовыми результатами?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                os.startfile(output_dir)
+            except Exception as e:
+                self.log(f"Не удалось открыть папку output: {e}")
 
     def on_error(self, err):
         self.log(f"Ошибка: {err}")
@@ -1452,17 +1554,33 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
 
     def log(self, msg):
+        if "Итог сохранён:" in (msg or ""):
+            self.has_generated_output_in_run = True
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {msg}")
 
-    def toggle_api_key_visibility(self):
-        is_password = self.kie_api_key_input.echoMode() == QLineEdit.EchoMode.Password
-        if is_password:
-            self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_toggle_api_key.setText("Скрыть")
-        else:
+    def on_api_key_changed(self, *_):
+        self.api_key_mask_timer.start()
+
+    def enforce_api_key_hidden(self):
+        if self.api_key_locked:
             self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_toggle_api_key.setText("Показать")
+
+    def toggle_api_key_lock(self):
+        self.api_key_locked = not self.api_key_locked
+        if self.api_key_locked:
+            self.kie_api_key_input.setReadOnly(True)
+            self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_api_key_lock.setText("🔒")
+            self.btn_api_key_lock.setToolTip("Ключ заблокирован")
+            self.log("KIE API Key заблокирован")
+            return
+
+        self.kie_api_key_input.setReadOnly(False)
+        self.kie_api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.btn_api_key_lock.setText("🔓")
+        self.btn_api_key_lock.setToolTip("Ключ разблокирован")
+        self.log("KIE API Key разблокирован: можно смотреть и редактировать")
 
     def check_generation_model(self):
         api_key = self.kie_api_key_input.text().strip()
@@ -1645,15 +1763,21 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "Обновления", f"У вас актуальная версия: {current_version}")
                 return
 
-            QMessageBox.warning(
+            answer = QMessageBox.question(
                 self,
-                "Обязательное обновление",
+                "Доступно обновление",
                 (
                     f"Доступна новая версия: {latest_version}\n"
                     f"Текущая версия: {current_version}\n\n"
-                    "Сейчас будет запущен установщик обновления."
+                    "Установить обновление сейчас?"
                 ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.log("Обновление отложено пользователем")
+                return
+
             self.log(f"Скачивание обновления {latest_version}...")
             installer_path = self._download_update_installer(download_url, expected_sha256=checksum or None)
             self.log(f"Установщик скачан: {installer_path}")
