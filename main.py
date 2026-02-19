@@ -47,7 +47,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
 
