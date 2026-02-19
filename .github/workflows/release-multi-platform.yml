@@ -60,7 +60,7 @@ jobs:
       - name: Build Windows setup (Inno Setup)
         shell: powershell
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" ".\installer.iss"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.app_version }}" ".\installer.iss"
 
       - name: Calculate setup hash
         shell: powershell

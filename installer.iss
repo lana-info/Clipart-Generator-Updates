@@ -1,5 +1,7 @@
 #define AppName "Clipart Generator"
-#define AppVersion "0.1.1"
+#ifndef AppVersion
+  #define AppVersion "0.1.1"
+#endif
 #define AppPublisher "Clipart Generator"
 #define AppExeName "Clipart Generator.exe"
 
