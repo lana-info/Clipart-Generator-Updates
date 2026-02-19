@@ -9,10 +9,7 @@ on:
       app_version:
         description: "Версия релиза (пример: 0.1.1)"
         required: true
-        default: "0.1.1"
-
-env:
-  APP_VERSION: ${{ github.event.inputs.app_version || '0.1.1' }}
+        default: "0.2.0"
 
 jobs:
   build-windows:
@@ -20,6 +17,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve app version
+        id: version
+        shell: powershell
+        run: |
+          $inputVersion = "${{ github.event.inputs.app_version }}"
+          if ([string]::IsNullOrWhiteSpace($inputVersion)) {
+            $version = (Get-Content -Raw "release/VERSION.txt").Trim()
+          }
+          else {
+            $version = $inputVersion
+          }
+
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "app_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -43,7 +55,7 @@ jobs:
 
       - name: Build app (PyInstaller)
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion ${{ env.APP_VERSION }}
+        run: powershell -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion ${{ steps.version.outputs.app_version }}
 
       - name: Build Windows setup (Inno Setup)
         shell: powershell
@@ -53,16 +65,16 @@ jobs:
       - name: Calculate setup hash
         shell: powershell
         run: |
-          $setupPath = "release\ClipartGenerator-Setup-${{ env.APP_VERSION }}.exe"
+          $setupPath = "release\ClipartGenerator-Setup-${{ steps.version.outputs.app_version }}.exe"
           $hash = (Get-FileHash $setupPath -Algorithm SHA256).Hash
           "WINDOWS_SETUP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-${{ env.APP_VERSION }}
+          name: windows-${{ steps.version.outputs.app_version }}
           path: |
-            release/ClipartGenerator-Setup-${{ env.APP_VERSION }}.exe
+            release/ClipartGenerator-Setup-${{ steps.version.outputs.app_version }}.exe
             release/VERSION.txt
 
   build-macos:
@@ -78,6 +90,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve app version
+        id: version
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.app_version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$(tr -d '\r\n' < release/VERSION.txt)"
+          fi
+
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "app_version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -122,7 +147,7 @@ jobs:
       - name: Pack macOS app to zip
         run: |
           mkdir -p release
-          ditto -c -k --sequesterRsrc --keepParent "dist/Clipart Generator.app" "release/ClipartGenerator-macOS-${{ env.APP_VERSION }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Clipart Generator.app" "release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip"
 
       - name: Notarize macOS app zip and staple app
         if: ${{ env.APPLE_DEVELOPER_ID_APPLICATION_CERT_BASE64 != '' && env.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD != '' && env.APPLE_KEYCHAIN_PASSWORD != '' && env.APPLE_CODESIGN_IDENTITY != '' && env.APPLE_NOTARY_APPLE_ID != '' && env.APPLE_NOTARY_TEAM_ID != '' && env.APPLE_NOTARY_APP_PASSWORD != '' }}
@@ -131,18 +156,18 @@ jobs:
           NOTARY_TEAM_ID: ${{ env.APPLE_NOTARY_TEAM_ID }}
           NOTARY_APP_PASSWORD: ${{ env.APPLE_NOTARY_APP_PASSWORD }}
         run: |
-          xcrun notarytool submit "release/ClipartGenerator-macOS-${{ env.APP_VERSION }}.zip" \
+          xcrun notarytool submit "release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip" \
             --apple-id "$NOTARY_APPLE_ID" \
             --team-id "$NOTARY_TEAM_ID" \
             --password "$NOTARY_APP_PASSWORD" \
             --wait
 
           xcrun stapler staple "dist/Clipart Generator.app"
-          ditto -c -k --sequesterRsrc --keepParent "dist/Clipart Generator.app" "release/ClipartGenerator-macOS-${{ env.APP_VERSION }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Clipart Generator.app" "release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip"
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ env.APP_VERSION }}
+          name: macos-${{ steps.version.outputs.app_version }}
           path: |
-            release/ClipartGenerator-macOS-${{ env.APP_VERSION }}.zip
+            release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip
