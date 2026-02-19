@@ -724,7 +724,6 @@ class MainWindow(QMainWindow):
         self.api_key_mask_timer.setSingleShot(True)
         self.api_key_mask_timer.setInterval(2500)
         self.api_key_mask_timer.timeout.connect(self.enforce_api_key_hidden)
-        self.ignore_minimize_until = 0.0
 
         self.load_config()
         self.setup_ui()
@@ -1802,27 +1801,6 @@ class MainWindow(QMainWindow):
             self.log(f"Проверка обновлений: {human_error}")
             if not silent:
                 QMessageBox.warning(self, "Обновления", f"Не удалось проверить обновления: {human_error}")
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() != QEvent.Type.WindowStateChange:
-            return
-        if not self.isMinimized():
-            return
-
-        if time.time() < self.ignore_minimize_until:
-            return
-
-        QTimer.singleShot(80, self._restore_from_minimized_state)
-
-    def _restore_from_minimized_state(self):
-        self.ignore_minimize_until = time.time() + 1.0
-        if self.isMinimized():
-            self.showNormal()
-        if not self.isVisible():
-            self.show()
-        self.raise_()
-        self.activateWindow()
 
     def _ratio_to_legacy_size_ui(self, ratio):
         return {
