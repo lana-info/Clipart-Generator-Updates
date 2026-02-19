@@ -1,5 +1,109 @@
 # Релиз и установка (Windows)
 
+## Быстрый чеклист релиза (обязательный)
+
+> Для этого проекта релиз состоит из **двух репозиториев**:
+> - основной: `Clipart-Generator`
+> - обновления: `Clipart-Generator-Updates` (локально: `_updates_repo_tmp`)
+
+### 0) Подготовка версии
+- [ ] Выбрать новую версию `x.y.z` (например `0.1.1`).
+- [ ] Обновить версию в `main.py` (`APP_VERSION`).
+- [ ] Обновить версию в `installer.iss` (`#define AppVersion`).
+- [ ] Обновить дефолт версии в `build.ps1` (`$AppVersion`).
+
+### 1) Проверки перед сборкой
+- [ ] Проверить синтаксис: `python -m py_compile main.py`.
+- [ ] Smoke-тест окна (offscreen):
+  `python -c "import os; os.environ['QT_QPA_PLATFORM']='offscreen'; import main; app=main.QApplication([]); w=main.MainWindow(); print('SMOKE_OK')"`
+
+### 2) Публикация кода (основной репозиторий)
+- [ ] Закоммитить изменения в `Clipart-Generator`.
+- [ ] Запушить в `origin/main`.
+
+### 3) Сборка инсталлятора
+- [ ] Собрать приложение: `powershell -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion x.y.z`.
+- [ ] Собрать setup: `ISCC .\installer.iss`.
+- [ ] Проверить наличие файла `release\ClipartGenerator-Setup-x.y.z.exe`.
+- [ ] Посчитать SHA256:
+  `Get-FileHash ".\release\ClipartGenerator-Setup-x.y.z.exe" -Algorithm SHA256`.
+
+### 4) Обновить репозиторий обновлений
+- [ ] Открыть `_updates_repo_tmp\version.json`.
+- [ ] Обновить поля:
+  - [ ] `latest_version = x.y.z`
+  - [ ] `download_url = https://github.com/lana-info/Clipart-Generator-Updates/releases/download/vx.y.z/ClipartGenerator-Setup-x.y.z.exe`
+  - [ ] `sha256 = <новый хеш setup>`
+- [ ] Закоммитить изменения в `_updates_repo_tmp`.
+- [ ] Запушить в `Clipart-Generator-Updates` (`origin/main`).
+
+### 5) Публикация GitHub Release
+- [ ] В репозитории `Clipart-Generator-Updates` создать/обновить Release `vx.y.z`.
+- [ ] Загрузить asset `ClipartGenerator-Setup-x.y.z.exe`.
+- [ ] Проверить, что имя файла в release совпадает с `download_url` из `version.json`.
+
+### 6) Проверка автообновления
+- [ ] На установленной предыдущей версии запустить приложение.
+- [ ] Убедиться, что найдено обновление до `x.y.z`.
+- [ ] Установить обновление и перезапустить приложение.
+- [ ] Проверить, что повторного запроса обновления по кругу нет.
+
+### 7) Финальная проверка релиза
+- [ ] Generation/processing smoke (1-2 промпта) проходит без падений.
+- [ ] Файлы сохраняются в `raw` и `output`.
+
+## Быстрый чеклист релиза (macOS)
+
+> Важно: сборка macOS делается **только на macOS** (на Windows собрать корректный `.app` нельзя).
+
+### 0) Подготовка окружения (Mac)
+- [ ] Установить Python 3.12+.
+- [ ] Установить зависимости: `pip install -r requirements.txt -r requirements-dev.txt`.
+- [ ] Установить PyInstaller (если не установлен): `pip install pyinstaller`.
+
+### 1) Подготовка версии
+- [ ] Убедиться, что `APP_VERSION` в `main.py` соответствует релизу.
+- [ ] Для кроссплатформенного релиза использовать одну и ту же версию, что и для Windows.
+
+### 2) Сборка `.app`
+- [ ] Выполнить сборку:
+
+```bash
+cd "/path/to/Clipart Generator"
+python -m PyInstaller --noconfirm --clean --windowed --name "Clipart Generator" --add-data ".env.example:." main.py
+```
+
+- [ ] Проверить результат: `dist/Clipart Generator.app`.
+
+### 3) Локальный smoke-тест на Mac
+- [ ] Открыть приложение двойным кликом.
+- [ ] Проверить запуск окна, вкладки и кнопку Start.
+- [ ] Проверить, что создаются папки `raw` и `output` в рабочей директории.
+
+### 4) Упаковка для дистрибуции
+- [ ] Базовый вариант: zip архив:
+
+```bash
+cd dist
+zip -r "Clipart-Generator-mac-x.y.z.zip" "Clipart Generator.app"
+```
+
+- [ ] (Опционально) сделать `.dmg` через отдельный инструмент (`create-dmg` и т.п.).
+
+### 5) Подпись и Gatekeeper (рекомендуется)
+- [ ] (Опционально) подписать `.app` сертификатом Apple Developer ID (`codesign`).
+- [ ] (Опционально) пройти notarization (`xcrun notarytool`).
+- [ ] Проверить запуск на «чистом» Mac без ручного обхода безопасности.
+
+### 6) Публикация
+- [ ] Загрузить mac-артефакт в GitHub Release (обычно отдельный asset рядом с Windows setup).
+- [ ] В описании релиза указать, что файл для macOS: `Clipart-Generator-mac-x.y.z.zip`.
+
+### 7) Важно про автообновление
+- [ ] Текущая логика автообновления в приложении ориентирована на Windows installer (`.exe`).
+- [ ] Для полноценного автообновления macOS нужен отдельный поток обновления (URL/формат артефакта и установка под macOS).
+- [ ] Статус репозиториев чистый (`git status`).
+
 ## 1) Подготовка окружения
 1. Установить Python 3.12+.
 2. Установить Inno Setup 6.
