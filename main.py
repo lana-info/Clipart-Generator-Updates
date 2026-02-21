@@ -8,6 +8,7 @@ import hashlib
 import mimetypes
 import re
 import ssl
+from io import BytesIO
 from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
@@ -47,7 +48,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
 
@@ -668,8 +669,11 @@ class WorkerThread(QThread):
             try:
                 req = request.Request(url, headers=h, method="GET")
                 content = self._request_with_retries(req, timeout=60)
-                with open(output_path, "wb") as f:
-                    f.write(content)
+                if output_path.lower().endswith(".png"):
+                    self._save_png_from_any_image_bytes(content, output_path)
+                else:
+                    with open(output_path, "wb") as f:
+                        f.write(content)
                 if output_path.lower().endswith(".png") and "output" in output_path.lower():
                     self._set_png_dpi(output_path, dpi=300)
                 return
@@ -678,6 +682,28 @@ class WorkerThread(QThread):
                 self.progress.emit(f"  Download попытка {idx} не удалась: {e}")
 
         raise RuntimeError(f"Не удалось скачать файл по URL ({host}): {last_error}")
+
+    def _save_png_from_any_image_bytes(self, content, output_path):
+        png_signature = b"\x89PNG\r\n\x1a\n"
+        if content.startswith(png_signature):
+            with open(output_path, "wb") as f:
+                f.write(content)
+            return
+
+        try:
+            with Image.open(BytesIO(content)) as img:
+                img.save(output_path, format="PNG")
+            self.progress.emit("  Формат ответа не PNG: выполнена конвертация в PNG")
+            return
+        except Exception:
+            pass
+
+        head_hex = content[:16].hex().upper()
+        head_text = content[:120].decode("utf-8", errors="ignore").strip().replace("\n", " ")
+        raise RuntimeError(
+            "Сервер вернул невалидный контент вместо изображения. "
+            f"Сигнатура: {head_hex}. Начало ответа: {head_text[:100]}"
+        )
 
     def _set_png_dpi(self, file_path, dpi=300):
         try:
