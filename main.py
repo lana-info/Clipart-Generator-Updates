@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import csv
 import time
 import uuid
 import tempfile
@@ -8,7 +9,7 @@ import hashlib
 import mimetypes
 import re
 import ssl
-from io import BytesIO
+from io import BytesIO, StringIO
 from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
@@ -46,6 +47,9 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QLineEdit,
     QHeaderView,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
 )
 
 APP_VERSION = "0.2.2"
@@ -729,6 +733,167 @@ class PromptTableWidget(QTableWidget):
         super().keyPressEvent(event)
 
 
+class CsvImportDialog(QDialog):
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self._headers = []
+        self._rows = []
+        self._prompts = []
+        self._last_error = ""
+        self._setup_ui()
+        self._reload_data()
+
+    def _setup_ui(self):
+        self.setWindowTitle("Импорт промптов из CSV")
+        self.resize(760, 520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.delimiter_combo = QComboBox()
+        self.delimiter_combo.addItem("Авто", "auto")
+        self.delimiter_combo.addItem(",", ",")
+        self.delimiter_combo.addItem(";", ";")
+        self.delimiter_combo.addItem("Таб", "\t")
+        self.delimiter_combo.addItem("|", "|")
+
+        self.header_checkbox = QCheckBox("Первая строка — заголовки")
+        self.header_checkbox.setChecked(True)
+
+        self.column_combo = QComboBox()
+
+        form.addRow("Разделитель:", self.delimiter_combo)
+        form.addRow("Колонка с промптами:", self.column_combo)
+        form.addRow("", self.header_checkbox)
+        layout.addLayout(form)
+
+        self.info_label = QLabel("")
+        layout.addWidget(self.info_label)
+
+        self.preview_text = QTextEdit()
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setPlaceholderText("Здесь будет предпросмотр промптов")
+        layout.addWidget(self.preview_text)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_button = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button:
+            ok_button.setText("Импортировать")
+        layout.addWidget(self.button_box)
+
+        self.delimiter_combo.currentIndexChanged.connect(self._reload_data)
+        self.header_checkbox.toggled.connect(self._reload_data)
+        self.column_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+    def _read_csv_text(self):
+        encodings = ["utf-8-sig", "cp1251", "utf-8"]
+        last_error = None
+        for enc in encodings:
+            try:
+                with open(self.file_path, "r", encoding=enc, newline="") as f:
+                    return f.read()
+            except Exception as e:
+                last_error = e
+        raise RuntimeError(f"Не удалось прочитать CSV: {last_error}")
+
+    def _detect_delimiter(self, sample_text):
+        selected = self.delimiter_combo.currentData()
+        if selected and selected != "auto":
+            return selected
+        try:
+            sniffed = csv.Sniffer().sniff(sample_text[:4096], delimiters=[",", ";", "\t", "|"])
+            return sniffed.delimiter
+        except Exception:
+            return ","
+
+    def _parse_rows(self, text, delimiter):
+        reader = csv.reader(StringIO(text), delimiter=delimiter)
+        rows = [row for row in reader if any(str(cell).strip() for cell in row)]
+        if not rows:
+            raise RuntimeError("CSV-файл пуст или не содержит данных")
+        return rows
+
+    def _reload_data(self):
+        prev_column = self.column_combo.currentData()
+        self._prompts = []
+        self._last_error = ""
+        try:
+            text = self._read_csv_text()
+            delimiter = self._detect_delimiter(text)
+            rows = self._parse_rows(text, delimiter)
+
+            has_header = self.header_checkbox.isChecked()
+            if has_header:
+                headers = [str(h).strip() or f"Колонка {i + 1}" for i, h in enumerate(rows[0])]
+                data_rows = rows[1:]
+            else:
+                max_cols = max(len(r) for r in rows)
+                headers = [f"Колонка {i + 1}" for i in range(max_cols)]
+                data_rows = rows
+
+            max_cols = max(len(headers), max((len(r) for r in data_rows), default=0))
+            headers = headers + [f"Колонка {i + 1}" for i in range(len(headers), max_cols)]
+            normalized_rows = [r + [""] * (max_cols - len(r)) for r in data_rows]
+
+            self._headers = headers
+            self._rows = normalized_rows
+
+            self.column_combo.blockSignals(True)
+            self.column_combo.clear()
+            for index, name in enumerate(self._headers):
+                self.column_combo.addItem(name, index)
+            target_index = prev_column if isinstance(prev_column, int) and 0 <= prev_column < len(self._headers) else 0
+            self.column_combo.setCurrentIndex(target_index)
+            self.column_combo.blockSignals(False)
+
+            selected_col = self.column_combo.currentData()
+            self._prompts = self._extract_prompts(selected_col)
+            delim_name = "TAB" if delimiter == "\t" else delimiter
+            self.info_label.setText(
+                f"Строк данных: {len(self._rows)} | Распознано промптов: {len(self._prompts)} | Разделитель: {delim_name}"
+            )
+            self._refresh_preview()
+        except Exception as e:
+            self._headers = []
+            self._rows = []
+            self._last_error = str(e)
+            self.info_label.setText(f"Ошибка импорта: {self._last_error}")
+            self.preview_text.setPlainText("")
+
+    def _extract_prompts(self, column_index):
+        if not isinstance(column_index, int):
+            return []
+        prompts = []
+        for row in self._rows:
+            if column_index >= len(row):
+                continue
+            value = str(row[column_index]).strip()
+            if value:
+                prompts.append(value)
+        return prompts
+
+    def _refresh_preview(self):
+        if self._last_error:
+            self.preview_text.setPlainText("")
+            return
+        selected_col = self.column_combo.currentData()
+        self._prompts = self._extract_prompts(selected_col)
+        preview_items = self._prompts[:8]
+        if not preview_items:
+            self.preview_text.setPlainText("Нет промптов для выбранной колонки")
+            return
+        parts = []
+        for idx, prompt in enumerate(preview_items, start=1):
+            parts.append(f"{idx}. {prompt}")
+        self.preview_text.setPlainText("\n\n──────────\n\n".join(parts))
+
+    def get_prompts(self):
+        return [p for p in self._prompts if p.strip()]
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -929,13 +1094,19 @@ class MainWindow(QMainWindow):
         self.btn_add_prompt_row = QPushButton("+")
         self.btn_add_prompt_row.clicked.connect(self.add_prompt_row)
         self.btn_add_prompt_row.setToolTip("Добавить строку промпта")
+        self.btn_import_csv = QPushButton("Импорт CSV")
+        self.btn_import_csv.clicked.connect(self.import_prompts_from_csv)
+        self.btn_import_csv.setToolTip("Импортирует промпты из CSV-файла")
         self.btn_clear_prompts = QPushButton("Удалить все")
         self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
+        self.btn_import_csv.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_clear_prompts.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
+        self.btn_import_csv.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
         prompt_btn_layout.addWidget(self.btn_add_prompt_row)
+        prompt_btn_layout.addWidget(self.btn_import_csv)
         prompt_btn_layout.addStretch()
         prompt_btn_layout.addWidget(self.btn_clear_prompts)
         prompt_tab_layout.addLayout(prompt_btn_layout)
@@ -1378,6 +1549,51 @@ class MainWindow(QMainWindow):
         self.refresh_prompts_table()
         self.save_prompts_storage()
         self.log(f"Вставлено промптов: {len(self.generated_prompts)}")
+
+    def import_prompts_from_csv(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выбрать CSV-файл с промптами",
+            "",
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not file_path:
+            return
+
+        dialog = CsvImportDialog(file_path, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        imported_prompts = dialog.get_prompts()
+        if not imported_prompts:
+            QMessageBox.warning(self, "Импорт CSV", "Не найдено ни одного промпта для импорта")
+            return
+
+        choice_box = QMessageBox(self)
+        choice_box.setIcon(QMessageBox.Icon.Question)
+        choice_box.setWindowTitle("Импорт CSV")
+        choice_box.setText(f"Найдено промптов: {len(imported_prompts)}")
+        choice_box.setInformativeText("Как импортировать список?")
+        replace_btn = choice_box.addButton("Заменить текущие", QMessageBox.ButtonRole.AcceptRole)
+        append_btn = choice_box.addButton("Добавить к текущим", QMessageBox.ButtonRole.ActionRole)
+        cancel_btn = choice_box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        choice_box.setDefaultButton(replace_btn)
+        choice_box.exec()
+
+        clicked = choice_box.clickedButton()
+        if clicked == cancel_btn or clicked is None:
+            return
+        if clicked == replace_btn:
+            self.generated_prompts = imported_prompts
+            self.log(f"CSV импорт: заменено промптов: {len(imported_prompts)}")
+        elif clicked == append_btn:
+            self.generated_prompts.extend(imported_prompts)
+            self.log(f"CSV импорт: добавлено промптов: {len(imported_prompts)}")
+        else:
+            return
+
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
 
     def _split_prompts_text(self, raw_text):
         text = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
