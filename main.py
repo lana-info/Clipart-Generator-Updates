@@ -55,6 +55,46 @@ from PyQt6.QtWidgets import (
 APP_VERSION = "0.2.2"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
+GENERATION_MODELS = [
+    # Text -> Image
+    {"id": "gpt4o-image", "label": "GPT‑4o Image", "type": "text_to_image"},
+    {"id": "gpt-image/1.5-text-to-image", "label": "GPT Image 1.5 (Text→Image)", "type": "text_to_image"},
+    {"id": "z-image", "label": "Z-Image", "type": "text_to_image"},
+    {"id": "google/imagen4", "label": "Google Imagen 4", "type": "text_to_image"},
+    {"id": "google/imagen4-fast", "label": "Google Imagen 4 Fast", "type": "text_to_image"},
+    {"id": "google/imagen4-ultra", "label": "Google Imagen 4 Ultra", "type": "text_to_image"},
+    {"id": "google/nano-banana", "label": "Google Nano Banana", "type": "text_to_image"},
+    {"id": "flux-2/flex-text-to-image", "label": "FLUX.2 Flex (Text→Image)", "type": "text_to_image"},
+    {"id": "flux-2/pro-text-to-image", "label": "FLUX.2 Pro (Text→Image)", "type": "text_to_image"},
+    {"id": "black-forest-labs/flux-kontext-pro", "label": "FLUX Kontext Pro", "type": "text_to_image"},
+    {"id": "black-forest-labs/flux-kontext-max", "label": "FLUX Kontext Max", "type": "text_to_image"},
+    {"id": "seedream", "label": "Seedream", "type": "text_to_image"},
+    {"id": "seedream-v4-text-to-image", "label": "Seedream v4 (Text→Image)", "type": "text_to_image"},
+    {"id": "4.5-text-to-image", "label": "Seedream 4.5 (Text→Image)", "type": "text_to_image"},
+    {"id": "grok-imagine/text-to-image", "label": "Grok Imagine (Text→Image)", "type": "text_to_image"},
+    {"id": "qwen/text-to-image", "label": "Qwen (Text→Image)", "type": "text_to_image"},
+
+    # Image -> Image
+    {"id": "google/pro-image-to-image", "label": "Google Pro (Image→Image)", "type": "image_to_image"},
+    {"id": "flux-2/pro-image-to-image", "label": "FLUX.2 Pro (Image→Image)", "type": "image_to_image"},
+    {"id": "flux-2/flex-image-to-image", "label": "FLUX.2 Flex (Image→Image)", "type": "image_to_image"},
+    {"id": "grok-imagine/image-to-image", "label": "Grok Imagine (Image→Image)", "type": "image_to_image"},
+    {"id": "gpt-image/1.5-image-to-image", "label": "GPT Image 1.5 (Image→Image)", "type": "image_to_image"},
+    {"id": "qwen/image-to-image", "label": "Qwen (Image→Image)", "type": "image_to_image"},
+
+    # Edit
+    {"id": "google/nano-banana-edit", "label": "Google Nano Banana Edit", "type": "edit"},
+    {"id": "seedream-v4-edit", "label": "Seedream v4 Edit", "type": "edit"},
+    {"id": "4.5-edit", "label": "Seedream 4.5 Edit", "type": "edit"},
+    {"id": "ideogram/v3-reframe", "label": "Ideogram v3 Reframe", "type": "edit"},
+    {"id": "ideogram/character-edit", "label": "Ideogram Character Edit", "type": "edit"},
+    {"id": "ideogram/character-remix", "label": "Ideogram Character Remix", "type": "edit"},
+    {"id": "ideogram/character", "label": "Ideogram Character", "type": "edit"},
+    {"id": "qwen/image-edit", "label": "Qwen Image Edit", "type": "edit"},
+]
+
+GENERATION_MODEL_META = {entry["id"]: entry for entry in GENERATION_MODELS}
+
 
 def get_user_data_dir():
     base_dir = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
@@ -436,22 +476,23 @@ class WorkerThread(QThread):
         normalized_model = self._normalize_generation_model(self.generation_model)
         if normalized_model == "gpt4o-image":
             return self._kie_generate_4o_image(prompt)
-        if normalized_model == "flux-kontext":
-            return self._kie_generate_generic_model("black-forest-labs/flux-kontext-pro", prompt)
         return self._kie_generate_generic_model(normalized_model, prompt)
 
     def _normalize_generation_model(self, model_name):
         model = (model_name or "").strip()
+        if not model:
+            self.progress.emit("  Модель не указана. Используем gpt4o-image.")
+            return "gpt4o-image"
+
         if model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
             return "gpt4o-image"
-        if model in {
-            "flux-kontext",
-            "black-forest-labs/flux-kontext-pro",
-            "black-forest-labs/flux-kontext-max",
-        }:
-            return "flux-kontext"
+
+        if model == "flux-kontext":
+            return "black-forest-labs/flux-kontext-pro"
+
         if model in {"z-image", "zai-org/z-image"}:
             return "z-image"
+
         if model in {
             "google/nano-banana",
             "google/nano-banana-edit",
@@ -460,12 +501,14 @@ class WorkerThread(QThread):
             "google/imagen4-ultra",
             "flux-2/flex-text-to-image",
             "flux-2/pro-text-to-image",
+            "black-forest-labs/flux-kontext-pro",
+            "black-forest-labs/flux-kontext-max",
         }:
             return model
-        self.progress.emit(
-            f"  Модель '{model}' не поддерживается в этом пайплайне. Используем gpt4o-image."
-        )
-        return "gpt4o-image"
+
+        # Возвращаем исходное имя, чтобы поддерживать новые модели без обновления кода.
+        self.progress.emit(f"  Используется пользовательская модель: {model}")
+        return model
 
     def _kie_generate_4o_image(self, prompt):
         headers = self._kie_headers()
@@ -1174,22 +1217,8 @@ class MainWindow(QMainWindow):
         self.btn_api_key_lock.clicked.connect(self.toggle_api_key_lock)
 
         self.generation_model_combo = QComboBox()
-        self.generation_model_combo.addItems([
-            "gpt4o-image",
-            "z-image",
-            "google/nano-banana",
-            "google/nano-banana-edit",
-            "google/imagen4",
-            "google/imagen4-fast",
-            "google/imagen4-ultra",
-            "flux-2/flex-text-to-image",
-            "flux-2/pro-text-to-image",
-            "black-forest-labs/flux-kontext-pro",
-            "black-forest-labs/flux-kontext-max",
-        ])
-        model = self.config.get("generation_model", "gpt4o-image")
-        mi = self.generation_model_combo.findText(model)
-        self.generation_model_combo.setCurrentIndex(mi if mi >= 0 else 0)
+        self.populate_generation_models()
+        self.set_generation_model_selection(self.config.get("generation_model", "gpt4o-image"))
 
         self.generation_size_combo = QComboBox()
         self.generation_size_combo.addItems(["1:1", "4:3", "3:4", "16:9", "9:16"])
@@ -1305,6 +1334,55 @@ class MainWindow(QMainWindow):
 
         self.refresh_upscale_factor_options()
         self.on_mode_changed(True)
+
+    def _normalize_generation_model_id(self, model_id):
+        model = (model_id or "").strip()
+        alias_map = {
+            "gpt-image-1": "gpt4o-image",
+            "gpt-image-1.5": "gpt4o-image",
+            "flux-kontext": "black-forest-labs/flux-kontext-pro",
+            "zai-org/z-image": "z-image",
+        }
+        if not model:
+            return "gpt4o-image"
+        return alias_map.get(model, model)
+
+    def _model_type_title(self, model_type):
+        return {
+            "text_to_image": "Text→Image",
+            "image_to_image": "Image→Image",
+            "edit": "Edit",
+        }.get(model_type or "", "Other")
+
+    def populate_generation_models(self):
+        self.generation_model_combo.clear()
+        for entry in GENERATION_MODELS:
+            group_title = self._model_type_title(entry.get("type"))
+            label = f"[{group_title}] {entry.get('label', entry.get('id', ''))}"
+            self.generation_model_combo.addItem(label, entry.get("id"))
+
+    def set_generation_model_selection(self, model_id):
+        normalized = self._normalize_generation_model_id(model_id)
+        idx = self.generation_model_combo.findData(normalized)
+        if idx >= 0:
+            self.generation_model_combo.setCurrentIndex(idx)
+            return
+
+        # Поддержка конфигов, где ранее мог сохраниться видимый label из комбобокса.
+        label_idx = self.generation_model_combo.findText(str(model_id or "").strip())
+        if label_idx >= 0:
+            self.generation_model_combo.setCurrentIndex(label_idx)
+            return
+
+        custom_label = f"[Custom] {normalized}"
+        self.generation_model_combo.addItem(custom_label, normalized)
+        self.generation_model_combo.setCurrentIndex(self.generation_model_combo.count() - 1)
+
+    def get_selected_generation_model_id(self):
+        model_id = self.generation_model_combo.currentData()
+        if not model_id:
+            model_id = self.generation_model_combo.currentText()
+        return self._normalize_generation_model_id(model_id)
 
     def create_template_values_table(self, placeholder_prefix):
         table = QTableWidget(0, 2)
@@ -1697,6 +1775,9 @@ class MainWindow(QMainWindow):
         self.has_generated_output_in_run = False
 
         run_mode = self.config.get("run_mode", "generate_only")
+        selected_model_id = self.get_selected_generation_model_id()
+        selected_meta = GENERATION_MODEL_META.get(selected_model_id, {})
+        selected_type = selected_meta.get("type", "text_to_image")
 
         if run_mode == "process_only":
             mode = "mode2_process"
@@ -1704,6 +1785,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Для режима обработки выберите файлы")
                 return
         elif run_mode == "both":
+            if selected_type != "text_to_image":
+                QMessageBox.warning(
+                    self,
+                    "Несовместимая модель",
+                    "Для генерации по списку промптов выберите модель типа Text→Image.",
+                )
+                return
             active_prompts = self.get_list_mode_prompts()
             if not active_prompts:
                 QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
@@ -1712,6 +1800,13 @@ class MainWindow(QMainWindow):
             self.refresh_prompts_table()
             mode = "mode_both"
         else:
+            if selected_type != "text_to_image":
+                QMessageBox.warning(
+                    self,
+                    "Несовместимая модель",
+                    "Текущий режим работает с промптами (Text→Image). Выберите соответствующую модель.",
+                )
+                return
             active_prompts = self.get_list_mode_prompts()
             if not active_prompts:
                 QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы один промпт")
@@ -1833,7 +1928,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Сначала укажите KIE API Key")
             return
 
-        raw_model = self.generation_model_combo.currentText().strip()
+        raw_model = self.get_selected_generation_model_id()
         timeout = max(10, int(self.config.get("timeout", 60)))
         ratio = self.generation_size_combo.currentText().strip() or "1:1"
         headers = {
@@ -1873,12 +1968,16 @@ class MainWindow(QMainWindow):
     def _probe_model_with_ratio(self, raw_model, ratio, headers, timeout):
         prompt = "simple test image"
         legacy_size = self._ratio_to_legacy_size_ui(ratio)
+        sample_image_url = "https://picsum.photos/768/768"
 
-        model = raw_model
-        if raw_model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
+        model = self._normalize_generation_model_id(raw_model)
+        if model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
             model = "gpt4o-image"
-        elif raw_model in {"flux-kontext", "black-forest-labs/flux-kontext-pro", "black-forest-labs/flux-kontext-max"}:
-            model = "flux-kontext"
+
+        if not model:
+            model = "gpt4o-image"
+
+        model_type = (GENERATION_MODEL_META.get(model) or {}).get("type", "text_to_image")
 
         if model == "gpt4o-image":
             url = "https://api.kie.ai/api/v1/gpt4o-image/generate"
@@ -1890,18 +1989,22 @@ class MainWindow(QMainWindow):
             ]
         else:
             url = "https://api.kie.ai/api/v1/jobs/createTask"
-            if model == "flux-kontext":
-                test_model = "black-forest-labs/flux-kontext-pro"
-            elif model == "z-image":
-                test_model = "z-image"
+            test_model = model
+            if model_type == "text_to_image":
+                payload_variants = [
+                    {"model": test_model, "input": {"prompt": prompt, "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "aspectRatio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "aspect_ratio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
+                ]
             else:
-                test_model = raw_model
-            payload_variants = [
-                {"model": test_model, "input": {"prompt": prompt, "size": ratio}},
-                {"model": test_model, "input": {"prompt": prompt, "aspectRatio": ratio}},
-                {"model": test_model, "input": {"prompt": prompt, "aspect_ratio": ratio}},
-                {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
-            ]
+                payload_variants = [
+                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "image_url": sample_image_url, "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "imageUrl": sample_image_url, "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "aspectRatio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": legacy_size}},
+                ]
 
         last_error = "Не удалось выполнить проверку"
         for payload in payload_variants:
@@ -2059,7 +2162,7 @@ class MainWindow(QMainWindow):
 
     def persist_ui_settings(self):
         self.config["kie_api_key"] = self.kie_api_key_input.text().strip()
-        self.config["generation_model"] = self.generation_model_combo.currentText()
+        self.config["generation_model"] = self.get_selected_generation_model_id()
         self.config["generation_size"] = self.generation_size_combo.currentText()
         self.config["remove_bg"] = self.chk_remove_bg.isChecked()
         self.config["upscale"] = self.chk_upscale.isChecked()
