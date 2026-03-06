@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
 )
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
 GENERATION_MODELS = [
