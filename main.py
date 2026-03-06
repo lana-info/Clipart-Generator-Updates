@@ -1407,19 +1407,25 @@ class MainWindow(QMainWindow):
         self.btn_import_csv = QPushButton("Импорт CSV")
         self.btn_import_csv.clicked.connect(self.import_prompts_from_csv)
         self.btn_import_csv.setToolTip("Импортирует промпты из CSV-файла")
+        self.btn_export_csv = QPushButton("Экспорт CSV")
+        self.btn_export_csv.clicked.connect(self.export_prompts)
+        self.btn_export_csv.setToolTip("Экспортирует промпты и референсы в CSV-файл")
         self.btn_clear_prompts = QPushButton("Удалить все")
         self.btn_clear_prompts.clicked.connect(self.clear_all_prompts)
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
         self.btn_import_csv.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_export_csv.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_clear_prompts.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_add_refs_all.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
         self.btn_add_refs_all.setStyleSheet(self.primary_button_style)
         self.btn_import_csv.setStyleSheet(self.primary_button_style)
+        self.btn_export_csv.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
         prompt_btn_layout.addWidget(self.btn_add_prompt_row)
         prompt_btn_layout.addWidget(self.btn_add_refs_all)
         prompt_btn_layout.addWidget(self.btn_import_csv)
+        prompt_btn_layout.addWidget(self.btn_export_csv)
         prompt_btn_layout.addStretch()
         prompt_btn_layout.addWidget(self.btn_clear_prompts)
         prompt_tab_layout.addLayout(prompt_btn_layout)
@@ -2140,39 +2146,41 @@ class MainWindow(QMainWindow):
         self.log("Список записей очищен")
 
     def export_prompts(self):
-        if not self.work_dir:
-            QMessageBox.warning(self, "Ошибка", "Сначала выберите рабочую папку")
-            return
-        if not self.generated_prompts:
-            QMessageBox.warning(self, "Ошибка", "Сначала создайте промпты")
+        entries = self.get_list_mode_prompts()
+        if not entries:
+            QMessageBox.warning(self, "Экспорт CSV", "Нет записей для экспорта")
             return
 
-        txt_path = os.path.join(self.work_dir, "prompts.txt")
-        csv_path = os.path.join(self.work_dir, "prompts.csv")
-        with open(txt_path, "w", encoding="utf-8") as f:
-            for entry in self.generated_prompts:
-                if isinstance(entry, dict):
+        base_dir = self.work_dir if self.work_dir else os.getcwd()
+        default_path = os.path.join(base_dir, "prompts_export.csv")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить CSV с промптами",
+            default_path,
+            "CSV files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".csv"):
+            file_path = f"{file_path}.csv"
+
+        try:
+            with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Prompt", "References"])
+                for entry in entries:
                     prompt_text = str(entry.get("prompt", "")).strip()
                     references_text = join_references(entry.get("references", []))
-                else:
-                    prompt_text = str(entry).strip()
-                    references_text = ""
-                if prompt_text or references_text:
-                    f.write(f"{prompt_text}\t{references_text}\n")
-        with open(csv_path, "w", encoding="utf-8", newline="") as f:
-            f.write("Prompt,References\n")
-            for entry in self.generated_prompts:
-                if isinstance(entry, dict):
-                    prompt_text = str(entry.get("prompt", ""))
-                    references_text = join_references(entry.get("references", []))
-                else:
-                    prompt_text = str(entry)
-                    references_text = ""
-                prompt_escaped = prompt_text.replace('"', '""')
-                references_escaped = references_text.replace('"', '""')
-                f.write(f'"{prompt_escaped}","{references_escaped}"\n')
-        self.log(f"Экспортировано: {txt_path}, {csv_path}")
-        QMessageBox.information(self, "Готово", "Записи экспортированы")
+                    writer.writerow([prompt_text, references_text])
+            self.log(f"CSV экспортирован: {file_path}")
+            QMessageBox.information(
+                self,
+                "Экспорт CSV",
+                "Файл успешно экспортирован.",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Экспорт CSV", f"Не удалось сохранить CSV: {e}")
 
     def start_work(self):
         if not self.work_dir:
