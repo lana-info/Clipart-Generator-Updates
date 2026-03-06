@@ -21,8 +21,8 @@ try:
 except Exception:
     certifi = None
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QEvent, QSize
+from PyQt6.QtGui import QKeySequence, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -50,6 +50,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QListWidget,
+    QListWidgetItem,
 )
 
 APP_VERSION = "0.2.3"
@@ -94,6 +96,23 @@ GENERATION_MODELS = [
 ]
 
 GENERATION_MODEL_META = {entry["id"]: entry for entry in GENERATION_MODELS}
+MAX_REFERENCES_PER_PROMPT = 5
+
+
+def split_references(raw_value):
+    if isinstance(raw_value, list):
+        values = [str(item).strip() for item in raw_value]
+        return [item for item in values if item]
+    text = str(raw_value or "").strip()
+    if not text:
+        return []
+    chunks = [part.strip() for part in re.split(r"\s*\|\s*", text)]
+    return [part for part in chunks if part]
+
+
+def join_references(references):
+    items = split_references(references)
+    return " | ".join(items)
 
 
 def get_user_data_dir():
@@ -195,8 +214,8 @@ class WorkerThread(QThread):
             self.progress_value.emit(int(((idx - 1) / total) * 100))
             try:
                 prompt_text = entry.get("prompt", "")
-                reference_value = entry.get("reference", "")
-                image_url = self._kie_generate_image(prompt_text, reference_value)
+                references = entry.get("references", [])
+                image_url = self._kie_generate_image(prompt_text, references)
                 gen_path = os.path.join(raw_dir, f"gen_{idx:03d}_{self.run_stamp}.png")
                 self._download_file(image_url, gen_path)
                 self.progress.emit(f"  Сгенерировано: {gen_path}")
@@ -223,13 +242,13 @@ class WorkerThread(QThread):
         for item in raw_entries or []:
             if isinstance(item, dict):
                 prompt_text = str(item.get("prompt", "")).strip()
-                reference_text = str(item.get("reference", "")).strip()
-                if prompt_text or reference_text:
-                    entries.append({"prompt": prompt_text, "reference": reference_text})
+                references = split_references(item.get("references", ""))
+                if prompt_text or references:
+                    entries.append({"prompt": prompt_text, "references": references})
                 continue
             prompt_text = str(item).strip()
             if prompt_text:
-                entries.append({"prompt": prompt_text, "reference": ""})
+                entries.append({"prompt": prompt_text, "references": []})
         return entries
 
     def _mode2_process_files(self, emit_final=True):
@@ -500,20 +519,31 @@ class WorkerThread(QThread):
         self.progress.emit(f"  Загрузка референса: {os.path.basename(ref)}")
         return self._kie_upload_file(ref)
 
-    def _kie_generate_image(self, prompt, reference_value=""):
+    def _resolve_reference_urls(self, references=None):
+        ref_items = split_references(references or [])
+        if len(ref_items) > MAX_REFERENCES_PER_PROMPT:
+            raise RuntimeError(f"Максимум {MAX_REFERENCES_PER_PROMPT} референсов на один промпт")
+        urls = []
+        for ref in ref_items:
+            resolved = self._resolve_reference_url(ref)
+            if resolved:
+                urls.append(resolved)
+        return urls
+
+    def _kie_generate_image(self, prompt, references=None):
         normalized_model = self._normalize_generation_model(self.generation_model)
         model_meta = GENERATION_MODEL_META.get(normalized_model, {})
         model_type = model_meta.get("type", "text_to_image")
-        reference_url = self._resolve_reference_url(reference_value)
+        reference_urls = self._resolve_reference_urls(references)
 
-        if model_type in {"image_to_image", "edit"} and not reference_url:
+        if model_type in {"image_to_image", "edit"} and not reference_urls:
             raise RuntimeError("Для выбранной модели нужен референс изображения")
 
         if normalized_model == "gpt4o-image":
-            if reference_url:
+            if reference_urls:
                 raise RuntimeError("Модель GPT‑4o Image не поддерживает референс в этом режиме")
             return self._kie_generate_4o_image(prompt)
-        return self._kie_generate_generic_model(normalized_model, prompt, reference_url=reference_url)
+        return self._kie_generate_generic_model(normalized_model, prompt, reference_urls=reference_urls)
 
     def _normalize_generation_model(self, model_name):
         model = (model_name or "").strip()
@@ -589,7 +619,8 @@ class WorkerThread(QThread):
         self.progress.emit(f"  4o Task ID: {task_id}")
         return self._kie_wait_4o_result(task_id)
 
-    def _kie_generate_generic_model(self, model_name, prompt, reference_url=""):
+    def _kie_generate_generic_model(self, model_name, prompt, reference_urls=None):
+        reference_urls = reference_urls or []
         ratio = self._normalize_ratio(self.generation_size)
         legacy_size = self._ratio_to_legacy_size(ratio)
 
@@ -598,14 +629,19 @@ class WorkerThread(QThread):
         else:
             model_candidates = [model_name]
 
-        if reference_url:
+        if reference_urls:
+            primary_ref = reference_urls[0]
+            image_list = list(reference_urls)
             input_variants = [
-                {"prompt": prompt, "image": reference_url, "size": ratio},
-                {"prompt": prompt, "image_url": reference_url, "size": ratio},
-                {"prompt": prompt, "imageUrl": reference_url, "size": ratio},
-                {"prompt": prompt, "image": reference_url, "aspectRatio": ratio},
-                {"prompt": prompt, "image": reference_url, "aspect_ratio": ratio},
-                {"prompt": prompt, "image": reference_url, "size": legacy_size},
+                {"prompt": prompt, "image": primary_ref, "size": ratio},
+                {"prompt": prompt, "image_url": primary_ref, "size": ratio},
+                {"prompt": prompt, "imageUrl": primary_ref, "size": ratio},
+                {"prompt": prompt, "image": primary_ref, "aspectRatio": ratio},
+                {"prompt": prompt, "image": primary_ref, "aspect_ratio": ratio},
+                {"prompt": prompt, "image": primary_ref, "size": legacy_size},
+                {"prompt": prompt, "images": image_list, "size": ratio},
+                {"prompt": prompt, "image_urls": image_list, "size": ratio},
+                {"prompt": prompt, "imageUrls": image_list, "size": ratio},
             ]
         else:
             input_variants = [
@@ -644,8 +680,10 @@ class WorkerThread(QThread):
             "prompt": prompt,
             "size": legacy_size,
         }
-        if reference_url:
-            fallback_input["image"] = reference_url
+        if reference_urls:
+            fallback_input["image"] = reference_urls[0]
+            if len(reference_urls) > 1:
+                fallback_input["images"] = list(reference_urls)
 
         fallback_task_id = self._kie_create_task(model_name, fallback_input)
         self.progress.emit(f"  Task ID: {fallback_task_id}")
@@ -853,11 +891,11 @@ class CsvImportDialog(QDialog):
         self.header_checkbox.setChecked(True)
 
         self.column_combo = QComboBox()
-        self.reference_column_combo = QComboBox()
+        self.references_column_combo = QComboBox()
 
         form.addRow("Разделитель:", self.delimiter_combo)
         form.addRow("Колонка с промптом:", self.column_combo)
-        form.addRow("Колонка с референсом:", self.reference_column_combo)
+        form.addRow("Колонка с референсами:", self.references_column_combo)
         form.addRow("", self.header_checkbox)
         layout.addLayout(form)
 
@@ -878,7 +916,7 @@ class CsvImportDialog(QDialog):
         self.delimiter_combo.currentIndexChanged.connect(self._reload_data)
         self.header_checkbox.toggled.connect(self._reload_data)
         self.column_combo.currentIndexChanged.connect(self._refresh_preview)
-        self.reference_column_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.references_column_combo.currentIndexChanged.connect(self._refresh_preview)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
@@ -912,7 +950,7 @@ class CsvImportDialog(QDialog):
 
     def _reload_data(self):
         prev_column = self.column_combo.currentData()
-        prev_reference_column = self.reference_column_combo.currentData()
+        prev_references_column = self.references_column_combo.currentData()
         self._entries = []
         self._last_error = ""
         try:
@@ -944,21 +982,21 @@ class CsvImportDialog(QDialog):
             self.column_combo.setCurrentIndex(target_index)
             self.column_combo.blockSignals(False)
 
-            self.reference_column_combo.blockSignals(True)
-            self.reference_column_combo.clear()
-            self.reference_column_combo.addItem("Без референса", -1)
+            self.references_column_combo.blockSignals(True)
+            self.references_column_combo.clear()
+            self.references_column_combo.addItem("Без референсов", -1)
             for index, name in enumerate(self._headers):
-                self.reference_column_combo.addItem(name, index)
-            if isinstance(prev_reference_column, int) and -1 <= prev_reference_column < len(self._headers):
-                ref_index = self.reference_column_combo.findData(prev_reference_column)
-                self.reference_column_combo.setCurrentIndex(ref_index if ref_index >= 0 else 0)
+                self.references_column_combo.addItem(name, index)
+            if isinstance(prev_references_column, int) and -1 <= prev_references_column < len(self._headers):
+                ref_index = self.references_column_combo.findData(prev_references_column)
+                self.references_column_combo.setCurrentIndex(ref_index if ref_index >= 0 else 0)
             else:
-                self.reference_column_combo.setCurrentIndex(0)
-            self.reference_column_combo.blockSignals(False)
+                self.references_column_combo.setCurrentIndex(0)
+            self.references_column_combo.blockSignals(False)
 
             selected_col = self.column_combo.currentData()
-            selected_ref_col = self.reference_column_combo.currentData()
-            self._entries = self._build_entries(selected_col, selected_ref_col)
+            selected_refs_col = self.references_column_combo.currentData()
+            self._entries = self._build_entries(selected_col, selected_refs_col)
             delim_name = "TAB" if delimiter == "\t" else delimiter
             self.info_label.setText(
                 f"Строк данных: {len(self._rows)} | Распознано записей: {len(self._entries)} | Разделитель: {delim_name}"
@@ -971,7 +1009,7 @@ class CsvImportDialog(QDialog):
             self.info_label.setText(f"Ошибка импорта: {self._last_error}")
             self.preview_text.setPlainText("")
 
-    def _build_entries(self, prompt_column_index, reference_column_index):
+    def _build_entries(self, prompt_column_index, references_column_index):
         if not isinstance(prompt_column_index, int):
             return []
         entries = []
@@ -979,11 +1017,12 @@ class CsvImportDialog(QDialog):
             if prompt_column_index >= len(row):
                 continue
             prompt_text = str(row[prompt_column_index]).strip()
-            reference_text = ""
-            if isinstance(reference_column_index, int) and reference_column_index >= 0 and reference_column_index < len(row):
-                reference_text = str(row[reference_column_index]).strip()
-            if prompt_text or reference_text:
-                entries.append({"prompt": prompt_text, "reference": reference_text})
+            references_text = ""
+            if isinstance(references_column_index, int) and 0 <= references_column_index < len(row):
+                references_text = str(row[references_column_index]).strip()
+            references = split_references(references_text)
+            if prompt_text or references:
+                entries.append({"prompt": prompt_text, "references": references})
         return entries
 
     def _refresh_preview(self):
@@ -991,8 +1030,8 @@ class CsvImportDialog(QDialog):
             self.preview_text.setPlainText("")
             return
         selected_col = self.column_combo.currentData()
-        selected_ref_col = self.reference_column_combo.currentData()
-        self._entries = self._build_entries(selected_col, selected_ref_col)
+        selected_refs_col = self.references_column_combo.currentData()
+        self._entries = self._build_entries(selected_col, selected_refs_col)
         preview_items = self._entries[:8]
         if not preview_items:
             self.preview_text.setPlainText("Нет записей для выбранных колонок")
@@ -1000,21 +1039,137 @@ class CsvImportDialog(QDialog):
         parts = []
         for idx, entry in enumerate(preview_items, start=1):
             prompt_text = entry.get("prompt", "")
-            reference_text = entry.get("reference", "")
-            if reference_text:
-                parts.append(f"{idx}. {prompt_text}\nРеференс: {reference_text}")
-            else:
-                parts.append(f"{idx}. {prompt_text}")
+            references_text = join_references(entry.get("references", []))
+            detail_lines = [f"{idx}. {prompt_text}"]
+            if references_text:
+                detail_lines.append(f"Референсы: {references_text}")
+            parts.append("\n".join(detail_lines))
         self.preview_text.setPlainText("\n\n──────────\n\n".join(parts))
 
     def get_entries(self):
         result = []
         for entry in self._entries:
             prompt_text = str(entry.get("prompt", "")).strip()
-            reference_text = str(entry.get("reference", "")).strip()
-            if prompt_text or reference_text:
-                result.append({"prompt": prompt_text, "reference": reference_text})
+            references = split_references(entry.get("references", []))
+            if prompt_text or references:
+                result.append({"prompt": prompt_text, "references": references})
         return result
+
+
+class PromptReferencesDialog(QDialog):
+    def __init__(self, prompt_text, references, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактирование промпта и референсов")
+        self.resize(760, 520)
+
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlainText(str(prompt_text or ""))
+
+        self.references_list = QListWidget()
+        self.references_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.references_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.references_list.setMovement(QListWidget.Movement.Static)
+        self.references_list.setWordWrap(True)
+        self.references_list.setSpacing(8)
+        self.references_list.setIconSize(QSize(96, 96))
+        self.references_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        for ref in split_references(references):
+            self._append_reference_item(ref)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(QLabel("Промпт:"))
+        main_layout.addWidget(self.prompt_edit)
+
+        refs_header = QHBoxLayout()
+        refs_header.addWidget(QLabel("Референсы (до 5):"))
+        refs_header.addStretch()
+        main_layout.addLayout(refs_header)
+        main_layout.addWidget(self.references_list)
+
+        buttons_row = QHBoxLayout()
+        self.btn_add_files = QPushButton("Добавить файлы")
+        self.btn_remove_selected = QPushButton("Удалить выбранный")
+        self.btn_clear_all = QPushButton("Очистить все")
+        buttons_row.addWidget(self.btn_add_files)
+        buttons_row.addWidget(self.btn_remove_selected)
+        buttons_row.addWidget(self.btn_clear_all)
+        buttons_row.addStretch()
+        main_layout.addLayout(buttons_row)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText("Сохранить")
+        main_layout.addWidget(self.button_box)
+
+        self.btn_add_files.clicked.connect(self.add_files)
+        self.btn_remove_selected.clicked.connect(self.remove_selected)
+        self.btn_clear_all.clicked.connect(self.clear_all)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+    def add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выбрать изображения",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        if not files:
+            return
+
+        existing = [
+            self.references_list.item(i).data(Qt.ItemDataRole.UserRole) or self.references_list.item(i).text()
+            for i in range(self.references_list.count())
+        ]
+        merged = []
+        for item in existing + [f for f in files if str(f).strip()]:
+            if item not in merged:
+                merged.append(item)
+
+        if len(merged) > MAX_REFERENCES_PER_PROMPT:
+            QMessageBox.warning(
+                self,
+                "Ограничение",
+                f"Можно добавить максимум {MAX_REFERENCES_PER_PROMPT} референсов",
+            )
+            merged = merged[:MAX_REFERENCES_PER_PROMPT]
+
+        self.references_list.clear()
+        for ref in merged:
+            self._append_reference_item(ref)
+
+    def _append_reference_item(self, ref):
+        reference_path = str(ref or "").strip()
+        if not reference_path:
+            return
+        title = os.path.basename(reference_path) or reference_path
+        item = QListWidgetItem(title)
+        item.setData(Qt.ItemDataRole.UserRole, reference_path)
+        if os.path.isfile(reference_path):
+            pixmap = QPixmap(reference_path)
+            if not pixmap.isNull():
+                item.setIcon(QIcon(pixmap))
+        self.references_list.addItem(item)
+
+    def remove_selected(self):
+        selected_items = self.references_list.selectedItems()
+        if not selected_items:
+            return
+        for item in selected_items:
+            self.references_list.takeItem(self.references_list.row(item))
+
+    def clear_all(self):
+        self.references_list.clear()
+
+    def get_data(self):
+        prompt = self.prompt_edit.toPlainText().strip()
+        refs = [
+            str(self.references_list.item(i).data(Qt.ItemDataRole.UserRole) or self.references_list.item(i).text()).strip()
+            for i in range(self.references_list.count())
+        ]
+        refs = [r for r in refs if r]
+        return prompt, refs[:MAX_REFERENCES_PER_PROMPT]
 
 
 class MainWindow(QMainWindow):
@@ -1060,24 +1215,24 @@ class MainWindow(QMainWindow):
                     for item in raw_prompts:
                         if isinstance(item, dict):
                             prompt_text = str(item.get("prompt", "")).strip()
-                            reference_text = str(item.get("reference", "")).strip()
-                            if prompt_text or reference_text:
-                                entries.append({"prompt": prompt_text, "reference": reference_text})
+                            references = split_references(item.get("references", ""))
+                            if prompt_text or references:
+                                entries.append({"prompt": prompt_text, "references": references})
                         else:
                             prompt_text = str(item).strip()
                             if prompt_text:
-                                entries.append({"prompt": prompt_text, "reference": ""})
+                                entries.append({"prompt": prompt_text, "references": []})
             elif isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
                         prompt_text = str(item.get("prompt", "")).strip()
-                        reference_text = str(item.get("reference", "")).strip()
-                        if prompt_text or reference_text:
-                            entries.append({"prompt": prompt_text, "reference": reference_text})
+                        references = split_references(item.get("references", ""))
+                        if prompt_text or references:
+                            entries.append({"prompt": prompt_text, "references": references})
                     else:
                         prompt_text = str(item).strip()
                         if prompt_text:
-                            entries.append({"prompt": prompt_text, "reference": ""})
+                            entries.append({"prompt": prompt_text, "references": []})
 
             self.generated_prompts = entries
             if hasattr(self, "table"):
@@ -1091,12 +1246,12 @@ class MainWindow(QMainWindow):
             for item in self.generated_prompts:
                 if isinstance(item, dict):
                     prompt_text = str(item.get("prompt", "")).strip()
-                    reference_text = str(item.get("reference", "")).strip()
+                    references = split_references(item.get("references", []))
                 else:
                     prompt_text = str(item).strip()
-                    reference_text = ""
-                if prompt_text or reference_text:
-                    normalized_entries.append({"prompt": prompt_text, "reference": reference_text})
+                    references = []
+                if prompt_text or references:
+                    normalized_entries.append({"prompt": prompt_text, "references": references})
 
             payload = {
                 "prompts": normalized_entries,
@@ -1246,6 +1401,9 @@ class MainWindow(QMainWindow):
         self.btn_add_prompt_row = QPushButton("+")
         self.btn_add_prompt_row.clicked.connect(self.add_prompt_row)
         self.btn_add_prompt_row.setToolTip("Добавить строку")
+        self.btn_add_refs_all = QPushButton("Референсы всем")
+        self.btn_add_refs_all.clicked.connect(self.add_references_to_all_prompts)
+        self.btn_add_refs_all.setToolTip("Добавить изображения ко всем промптам")
         self.btn_import_csv = QPushButton("Импорт CSV")
         self.btn_import_csv.clicked.connect(self.import_prompts_from_csv)
         self.btn_import_csv.setToolTip("Импортирует промпты из CSV-файла")
@@ -1254,10 +1412,13 @@ class MainWindow(QMainWindow):
         self.btn_clear_prompts.setToolTip("Очищает список промптов в предпросмотре")
         self.btn_import_csv.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_clear_prompts.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_add_refs_all.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_add_prompt_row.setStyleSheet(self.primary_button_style)
+        self.btn_add_refs_all.setStyleSheet(self.primary_button_style)
         self.btn_import_csv.setStyleSheet(self.primary_button_style)
         self.btn_clear_prompts.setStyleSheet(self.primary_button_style)
         prompt_btn_layout.addWidget(self.btn_add_prompt_row)
+        prompt_btn_layout.addWidget(self.btn_add_refs_all)
         prompt_btn_layout.addWidget(self.btn_import_csv)
         prompt_btn_layout.addStretch()
         prompt_btn_layout.addWidget(self.btn_clear_prompts)
@@ -1265,8 +1426,8 @@ class MainWindow(QMainWindow):
 
         preview_group = QGroupBox("Список записей")
         preview_layout = QVBoxLayout()
-        self.table = PromptTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Промпт", "Референс", ""])
+        self.table = PromptTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Промпт", "Референсы", "🖼", ""])
         self.table.verticalHeader().setVisible(True)
         self.table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -1275,13 +1436,16 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 320)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(1, 220)
         self.table.setColumnWidth(2, 44)
+        self.table.setColumnWidth(3, 44)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setMinimumHeight(280)
         self.table.bulkTextPasted.connect(self.on_table_bulk_paste)
         self.table.itemChanged.connect(self.on_prompt_item_changed)
+        self.table.itemDoubleClicked.connect(self.on_prompt_item_double_clicked)
         preview_layout.addWidget(self.table)
         preview_group.setLayout(preview_layout)
         prompt_tab_layout.addWidget(preview_group)
@@ -1644,12 +1808,81 @@ class MainWindow(QMainWindow):
             self.log(f"Выбрано файлов: {len(files)}")
 
     def add_prompt_row(self):
-        self.generated_prompts.append({"prompt": "", "reference": ""})
+        self.generated_prompts.append({"prompt": "", "references": []})
         self.refresh_prompts_table()
         self.save_prompts_storage()
         row_index = len(self.generated_prompts) - 1
         self.table.setCurrentCell(row_index, 0)
         self.table.editItem(self.table.item(row_index, 0))
+
+    def _pick_reference_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выбрать референсы",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        return [f for f in files if str(f).strip()]
+
+    def _merge_references(self, existing, additions):
+        result = []
+        for item in split_references(existing) + split_references(additions):
+            if item not in result:
+                result.append(item)
+        if len(result) > MAX_REFERENCES_PER_PROMPT:
+            result = result[:MAX_REFERENCES_PER_PROMPT]
+        return result
+
+    def _set_row_references(self, row_index, references):
+        if not (0 <= row_index < len(self.generated_prompts)):
+            return
+        current_entry = self.generated_prompts[row_index]
+        if not isinstance(current_entry, dict):
+            current_entry = {"prompt": str(current_entry), "references": []}
+        current_entry["references"] = split_references(references)[:MAX_REFERENCES_PER_PROMPT]
+        self.generated_prompts[row_index] = current_entry
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
+
+    def add_references_to_all_prompts(self):
+        if not self.generated_prompts:
+            QMessageBox.warning(self, "Референсы", "Список промптов пуст")
+            return
+        files = self._pick_reference_files()
+        if not files:
+            return
+
+        for idx, entry in enumerate(self.generated_prompts):
+            current = entry if isinstance(entry, dict) else {"prompt": str(entry), "references": []}
+            current["references"] = self._merge_references(current.get("references", []), files)
+            self.generated_prompts[idx] = current
+
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
+        self.log(f"Референсы добавлены ко всем промптам: {len(files)}")
+
+    def open_prompt_editor(self, row_index):
+        if not (0 <= row_index < len(self.generated_prompts)):
+            return
+        entry = self.generated_prompts[row_index]
+        if not isinstance(entry, dict):
+            entry = {"prompt": str(entry), "references": []}
+
+        dialog = PromptReferencesDialog(entry.get("prompt", ""), entry.get("references", []), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        prompt_text, references = dialog.get_data()
+        self.generated_prompts[row_index] = {
+            "prompt": prompt_text,
+            "references": split_references(references),
+        }
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
+
+    def on_prompt_item_double_clicked(self, item):
+        if item.column() in {0, 1}:
+            self.open_prompt_editor(item.row())
 
     def build_prompts(self):
         if not hasattr(self, "master_prompt"):
@@ -1667,7 +1900,7 @@ class MainWindow(QMainWindow):
         self.generated_prompts = []
         max_len = max(len(a), len(b), len(c))
         if max_len == 0:
-            self.generated_prompts = [{"prompt": template, "reference": ""}]
+            self.generated_prompts = [{"prompt": template, "references": []}]
         else:
             for i in range(max_len):
                 prompt = template
@@ -1677,7 +1910,7 @@ class MainWindow(QMainWindow):
                     prompt = prompt.replace("{B}", b[i])
                 if c and i < len(c):
                     prompt = prompt.replace("{C}", c[i])
-                self.generated_prompts.append({"prompt": prompt, "reference": ""})
+                self.generated_prompts.append({"prompt": prompt, "references": []})
         self.refresh_prompts_table()
 
         self.log(f"Создано промптов: {len(self.generated_prompts)}")
@@ -1713,11 +1946,11 @@ class MainWindow(QMainWindow):
         entries = []
         for row in range(self.table.rowCount()):
             prompt_item = self.table.item(row, 0)
-            reference_item = self.table.item(row, 1)
+            references_item = self.table.item(row, 1)
             prompt_text = (prompt_item.text() if prompt_item else "").strip()
-            reference_text = (reference_item.text() if reference_item else "").strip()
-            if prompt_text or reference_text:
-                entries.append({"prompt": prompt_text, "reference": reference_text})
+            references = split_references(references_item.text() if references_item else "")
+            if prompt_text or references:
+                entries.append({"prompt": prompt_text, "references": references})
         return entries
 
     def import_prompts_from_template(self):
@@ -1734,13 +1967,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Не удалось распознать промпты")
             return
 
-        self.generated_prompts = [{"prompt": p, "reference": ""} for p in prompts]
+        self.generated_prompts = [{"prompt": p, "references": []} for p in prompts]
         self.refresh_prompts_table()
         self.log(f"Импортировано промптов: {len(self.generated_prompts)}")
 
     def on_table_bulk_paste(self, raw_text):
         prompts = self._split_prompts_text(raw_text)
-        self.generated_prompts = [{"prompt": p, "reference": ""} for p in prompts]
+        self.generated_prompts = [{"prompt": p, "references": []} for p in prompts]
         self.refresh_prompts_table()
         self.save_prompts_storage()
         self.log(f"Вставлено промптов: {len(self.generated_prompts)}")
@@ -1823,22 +2056,49 @@ class MainWindow(QMainWindow):
             self.table.insertRow(row)
             if isinstance(entry, dict):
                 prompt_text = str(entry.get("prompt", ""))
-                reference_text = str(entry.get("reference", ""))
+                references_text = join_references(entry.get("references", []))
             else:
                 prompt_text = str(entry)
-                reference_text = ""
+                references_text = ""
 
             prompt_item = QTableWidgetItem(prompt_text)
-            reference_item = QTableWidgetItem(reference_text)
+            references_item = QTableWidgetItem(references_text)
+            references_tooltip = self._build_references_tooltip(entry.get("references", []) if isinstance(entry, dict) else [])
+            if references_tooltip:
+                references_item.setToolTip(references_tooltip)
             self.table.setItem(row, 0, prompt_item)
-            self.table.setItem(row, 1, reference_item)
+            self.table.setItem(row, 1, references_item)
 
             delete_btn = QPushButton("🗑")
             delete_btn.setToolTip("Удалить запись")
             delete_btn.setMinimumHeight(28)
             delete_btn.clicked.connect(lambda _, r=index: self.remove_prompt_row(r))
-            self.table.setCellWidget(row, 2, delete_btn)
+
+            edit_btn = QPushButton("🖼")
+            edit_btn.setToolTip("Открыть редактор промпта и референсов")
+            edit_btn.setMinimumHeight(28)
+            edit_btn.clicked.connect(lambda _, r=index: self.open_prompt_editor(r))
+
+            self.table.setCellWidget(row, 2, edit_btn)
+            self.table.setCellWidget(row, 3, delete_btn)
         self.is_updating_prompts_table = False
+
+    def _build_references_tooltip(self, references):
+        items = split_references(references)
+        if not items:
+            return ""
+        html_parts = ["<div><b>Референсы:</b></div>"]
+        for ref in items[:3]:
+            normalized_path = os.path.abspath(ref) if os.path.isfile(ref) else ""
+            label = os.path.basename(ref) or ref
+            if normalized_path:
+                img_src = normalized_path.replace("\\", "/")
+                html_parts.append(f"<div style='margin-top:4px;'><div>{label}</div><img src='file:///{img_src}' width='140'></div>")
+            else:
+                html_parts.append(f"<div style='margin-top:4px;'>{label}</div>")
+        if len(items) > 3:
+            html_parts.append(f"<div style='margin-top:4px;'>И ещё: {len(items) - 3}</div>")
+        return "".join(html_parts)
 
     def on_prompt_item_changed(self, item):
         if self.is_updating_prompts_table:
@@ -1849,11 +2109,19 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(self.generated_prompts):
             current_entry = self.generated_prompts[row]
             if not isinstance(current_entry, dict):
-                current_entry = {"prompt": str(current_entry), "reference": ""}
+                current_entry = {"prompt": str(current_entry), "references": []}
             if item.column() == 0:
                 current_entry["prompt"] = item.text()
             else:
-                current_entry["reference"] = item.text()
+                refs = split_references(item.text())
+                if len(refs) > MAX_REFERENCES_PER_PROMPT:
+                    refs = refs[:MAX_REFERENCES_PER_PROMPT]
+                    QMessageBox.warning(
+                        self,
+                        "Ограничение референсов",
+                        f"Можно указать максимум {MAX_REFERENCES_PER_PROMPT} референсов на один промпт",
+                    )
+                current_entry["references"] = refs
             self.generated_prompts[row] = current_entry
             self.save_prompts_storage()
 
@@ -1885,27 +2153,24 @@ class MainWindow(QMainWindow):
             for entry in self.generated_prompts:
                 if isinstance(entry, dict):
                     prompt_text = str(entry.get("prompt", "")).strip()
-                    reference_text = str(entry.get("reference", "")).strip()
+                    references_text = join_references(entry.get("references", []))
                 else:
                     prompt_text = str(entry).strip()
-                    reference_text = ""
-                if prompt_text or reference_text:
-                    if reference_text:
-                        f.write(f"{prompt_text}\t{reference_text}\n")
-                    else:
-                        f.write(prompt_text + "\n")
+                    references_text = ""
+                if prompt_text or references_text:
+                    f.write(f"{prompt_text}\t{references_text}\n")
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
-            f.write("Prompt,Reference\n")
+            f.write("Prompt,References\n")
             for entry in self.generated_prompts:
                 if isinstance(entry, dict):
                     prompt_text = str(entry.get("prompt", ""))
-                    reference_text = str(entry.get("reference", ""))
+                    references_text = join_references(entry.get("references", []))
                 else:
                     prompt_text = str(entry)
-                    reference_text = ""
+                    references_text = ""
                 prompt_escaped = prompt_text.replace('"', '""')
-                reference_escaped = reference_text.replace('"', '""')
-                f.write(f'"{prompt_escaped}","{reference_escaped}"\n')
+                references_escaped = references_text.replace('"', '""')
+                f.write(f'"{prompt_escaped}","{references_escaped}"\n')
         self.log(f"Экспортировано: {txt_path}, {csv_path}")
         QMessageBox.information(self, "Готово", "Записи экспортированы")
 
@@ -1951,7 +2216,8 @@ class MainWindow(QMainWindow):
 
             if selected_type in {"image_to_image", "edit"}:
                 has_missing_reference = any(
-                    not str(entry.get("reference", "")).strip() for entry in active_prompts
+                    (len(split_references(entry.get("references", []))) == 0)
+                    for entry in active_prompts
                 )
                 if has_missing_reference:
                     QMessageBox.warning(
