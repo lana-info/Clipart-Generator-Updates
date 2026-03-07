@@ -7,8 +7,9 @@ from urllib import request, error
 
 
 class LicenseClient:
-    def __init__(self, server_url, cache_path, app_version, timeout=10):
+    def __init__(self, server_url, cache_path, app_version, timeout=10, backup_server_url=""):
         self.server_url = (server_url or "").rstrip("/")
+        self.backup_server_url = (backup_server_url or "").rstrip("/")
         self.cache_path = cache_path
         self.app_version = app_version
         self.timeout = timeout
@@ -25,7 +26,7 @@ class LicenseClient:
             "device_fingerprint": self.device_fingerprint(),
             "app_version": self.app_version,
         }
-        result = self._post("/activate", payload)
+        result = self._post_any("/activate", payload)
         if result.get("ok"):
             self._save_cache(result)
         return result
@@ -37,7 +38,7 @@ class LicenseClient:
             "app_version": self.app_version,
         }
         try:
-            result = self._post("/validate", payload)
+            result = self._post_any("/validate", payload)
             if result.get("ok"):
                 self._save_cache(result)
             return result
@@ -48,12 +49,30 @@ class LicenseClient:
                     return offline
             return {"ok": False, "message": f"Ошибка проверки лицензии: {e}"}
 
+    def status(self, license_key, use_offline=True):
+        payload = {
+            "license_key": (license_key or "").strip(),
+            "device_fingerprint": self.device_fingerprint(),
+            "app_version": self.app_version,
+        }
+        try:
+            result = self._post_any("/status", payload, fallback_paths=["/validate"])
+            if result.get("ok"):
+                self._save_cache(result)
+            return result
+        except Exception as e:
+            if use_offline:
+                offline = self._validate_offline_cache(payload["license_key"], payload["device_fingerprint"])
+                if offline.get("ok"):
+                    return offline
+            return {"ok": False, "message": f"Ошибка проверки статуса лицензии: {e}"}
+
     def deactivate(self, license_key):
         payload = {
             "license_key": (license_key or "").strip(),
             "device_fingerprint": self.device_fingerprint(),
         }
-        result = self._post("/deactivate", payload)
+        result = self._post_any("/deactivate", payload)
         if result.get("ok") and os.path.exists(self.cache_path):
             try:
                 os.remove(self.cache_path)
@@ -61,10 +80,35 @@ class LicenseClient:
                 pass
         return result
 
-    def _post(self, path, payload):
-        if not self.server_url:
+    def _server_urls(self):
+        urls = []
+        for url in [self.server_url, self.backup_server_url]:
+            normalized = (url or "").strip().rstrip("/")
+            if normalized and normalized not in urls:
+                urls.append(normalized)
+        return urls
+
+    def _post_any(self, path, payload, fallback_paths=None):
+        urls = self._server_urls()
+        if not urls:
             raise RuntimeError("Не указан URL сервера лицензий")
-        url = f"{self.server_url}{path}"
+
+        path_variants = [path]
+        for item in fallback_paths or []:
+            if item and item not in path_variants:
+                path_variants.append(item)
+
+        last_error = None
+        for base_url in urls:
+            for route in path_variants:
+                try:
+                    return self._post(base_url, route, payload)
+                except Exception as e:
+                    last_error = e
+        raise RuntimeError(str(last_error) if last_error else "Не удалось выполнить запрос к серверу лицензий")
+
+    def _post(self, base_url, path, payload):
+        url = f"{base_url}{path}"
         req = request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -85,6 +129,9 @@ class LicenseClient:
             "device_fingerprint": self.device_fingerprint(),
             "cached_until": expires_at.isoformat(),
             "token": response_payload.get("token", ""),
+            "expires_at": response_payload.get("expires_at"),
+            "updates_until": response_payload.get("updates_until"),
+            "updates_allowed": bool(response_payload.get("updates_allowed", True)),
         }
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         with open(self.cache_path, "w", encoding="utf-8") as f:
@@ -103,6 +150,15 @@ class LicenseClient:
             until = datetime.fromisoformat(cache.get("cached_until"))
             if datetime.now(timezone.utc) > until:
                 return {"ok": False, "message": "Офлайн-кеш лицензии истёк"}
-            return {"ok": True, "message": "Офлайн-проверка лицензии успешна", "offline": True}
+            return {
+                "ok": True,
+                "message": "Офлайн-проверка лицензии успешна",
+                "offline": True,
+                "license_key": cache.get("license_key", ""),
+                "token": cache.get("token", ""),
+                "expires_at": cache.get("expires_at"),
+                "updates_until": cache.get("updates_until"),
+                "updates_allowed": bool(cache.get("updates_allowed", True)),
+            }
         except Exception as e:
             return {"ok": False, "message": f"Ошибка офлайн-кеша: {e}"}

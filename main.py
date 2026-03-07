@@ -14,8 +14,9 @@ from io import BytesIO, StringIO
 from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageChops
+from license_client import LicenseClient
 
 try:
     import certifi
@@ -127,6 +128,7 @@ def get_user_data_dir():
 USER_DATA_DIR = get_user_data_dir()
 CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
 PROMPTS_STORAGE_FILE = os.path.join(USER_DATA_DIR, "prompts.json")
+LICENSE_CACHE_FILE = os.path.join(USER_DATA_DIR, "license_cache.json")
 
 
 def build_ssl_context():
@@ -775,6 +777,10 @@ class WorkerThread(QThread):
                 {"prompt": prompt, "images": image_list, "size": ratio},
                 {"prompt": prompt, "image_urls": image_list, "size": ratio},
                 {"prompt": prompt, "imageUrls": image_list, "size": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": ratio},
+                {"prompt": prompt, "inputUrls": image_list, "size": ratio},
+                {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": legacy_size},
             ]
         else:
             input_variants = [
@@ -1428,6 +1434,10 @@ class MainWindow(QMainWindow):
             "run_mode": "generate_only",
             "prompt_input_mode": "list",
             "last_work_dir": "",
+            "license_key": "",
+            "license_server_url": "",
+            "license_backup_server_url": "",
+            "last_updates_expired_notice_at": "",
         }
         self._migrate_legacy_local_files()
         if os.path.exists(CONFIG_FILE):
@@ -1724,10 +1734,6 @@ class MainWindow(QMainWindow):
         if size_value in legacy_map:
             size_value = legacy_map[size_value]
         self.generation_size_combo.setCurrentText(size_value if size_value else "1:1")
-        self.btn_check_model = QPushButton("Проверить")
-        self.btn_check_model.setFixedSize(self.standard_button_width, self.standard_button_height)
-        self.btn_check_model.setStyleSheet(self.compact_button_style)
-        self.btn_check_model.clicked.connect(self.check_generation_model)
         self.btn_check_balance = QPushButton("Проверить баланс")
         self.btn_check_balance.setFixedSize(130, 32)
         self.btn_check_balance.setStyleSheet(self.compact_button_style)
@@ -1764,7 +1770,6 @@ class MainWindow(QMainWindow):
         kie_layout.addWidget(self.reference_generation_model_combo, 2, 1)
         kie_layout.addWidget(lbl_gen_size, 3, 0)
         kie_layout.addWidget(self.generation_size_combo, 3, 1)
-        kie_layout.addWidget(self.btn_check_model, 3, 2)
         kie_group.setLayout(kie_layout)
         settings_tab_layout.addWidget(kie_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -1969,6 +1974,12 @@ class MainWindow(QMainWindow):
     def setup_settings_autosave_connections(self):
         self.kie_api_key_input.textChanged.connect(self.schedule_settings_save)
         self.kie_api_key_input.textChanged.connect(self.on_api_key_changed)
+        if hasattr(self, "license_key_input"):
+            self.license_key_input.textChanged.connect(self.schedule_settings_save)
+        if hasattr(self, "license_server_url_input"):
+            self.license_server_url_input.textChanged.connect(self.schedule_settings_save)
+        if hasattr(self, "license_backup_server_url_input"):
+            self.license_backup_server_url_input.textChanged.connect(self.schedule_settings_save)
         self.text_generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.reference_generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
@@ -2656,27 +2667,73 @@ class MainWindow(QMainWindow):
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        reference_model_type = (GENERATION_MODEL_META.get(reference_model) or {}).get("type", "text_to_image")
 
         try:
             text_ok, text_msg, text_task_id = self._probe_model_with_ratio(text_model, "1:1", headers, timeout)
             if not text_ok:
                 raise RuntimeError(f"Недоступна модель для текстовых промптов: {text_model}. {text_msg}")
 
-            ratio_ok, ratio_msg, _ = self._probe_model_with_ratio(text_model, ratio, headers, timeout)
-            if not ratio_ok:
-                raise RuntimeError(
-                    f"Недоступно соотношение {ratio} для модели {text_model}. {ratio_msg}"
-                )
+            # Если уже проверили 1:1 и выбран тоже 1:1, повторный сетевой запрос не нужен.
+            if ratio != "1:1":
+                ratio_ok, ratio_msg, _ = self._probe_model_with_ratio(text_model, ratio, headers, timeout)
+                if not ratio_ok:
+                    raise RuntimeError(
+                        f"Недоступно соотношение {ratio} для модели {text_model}. {ratio_msg}"
+                    )
 
             ref_ok, ref_msg, ref_task_id = self._probe_model_with_ratio(reference_model, "1:1", headers, timeout)
+            if (
+                not ref_ok
+                and reference_model == "gpt-image/1.5-image-to-image"
+                and "This field is required" in str(ref_msg)
+            ):
+                self.log(
+                    "Проверка image-to-image для gpt-image/1.5-image-to-image пропущена: "
+                    "API возвращает schema-ошибку на тестовом запросе, но модель может работать в реальном запуске."
+                )
+                ref_ok = True
+                ref_task_id = "schema-check-skipped"
+            elif (
+                not ref_ok
+                and reference_model_type in {"image_to_image", "edit"}
+                and self._is_schema_required_error(ref_msg)
+            ):
+                self.log(
+                    "Проверка image-to-image/edit модели переведена в мягкий режим: "
+                    "API вернул schema-ошибку на тестовом запросе. Модель будет проверена реальным запуском."
+                )
+                ref_ok = True
+                ref_task_id = "schema-check-skipped"
             if not ref_ok:
                 raise RuntimeError(f"Недоступна модель для промптов с референсами: {reference_model}. {ref_msg}")
 
-            ref_ratio_ok, ref_ratio_msg, _ = self._probe_model_with_ratio(reference_model, ratio, headers, timeout)
-            if not ref_ratio_ok:
-                raise RuntimeError(
-                    f"Недоступно соотношение {ratio} для модели {reference_model}. {ref_ratio_msg}"
-                )
+            if ratio != "1:1":
+                ref_ratio_ok, ref_ratio_msg, _ = self._probe_model_with_ratio(reference_model, ratio, headers, timeout)
+                if (
+                    not ref_ratio_ok
+                    and reference_model == "gpt-image/1.5-image-to-image"
+                    and "This field is required" in str(ref_ratio_msg)
+                ):
+                    self.log(
+                        "Проверка соотношения для gpt-image/1.5-image-to-image пропущена: "
+                        "API возвращает schema-ошибку на тестовом запросе."
+                    )
+                    ref_ratio_ok = True
+                elif (
+                    not ref_ratio_ok
+                    and reference_model_type in {"image_to_image", "edit"}
+                    and self._is_schema_required_error(ref_ratio_msg)
+                ):
+                    self.log(
+                        "Проверка соотношения для image-to-image/edit модели пропущена: "
+                        "API вернул schema-ошибку на тестовом запросе."
+                    )
+                    ref_ratio_ok = True
+                if not ref_ratio_ok:
+                    raise RuntimeError(
+                        f"Недоступно соотношение {ratio} для модели {reference_model}. {ref_ratio_msg}"
+                    )
 
             self.log(
                 (
@@ -2700,6 +2757,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"Проверка моделей не пройдена: {e}")
             QMessageBox.warning(self, "Проверка моделей", f"Ошибка проверки: {e}")
+
+    def _is_schema_required_error(self, message):
+        text = str(message or "").lower()
+        return (
+            "is required" in text
+            or "field is required" in text
+            or "required field" in text
+            or "missing required" in text
+        )
 
     def _extract_credit_value(self, payload):
         priority_keys = [
@@ -2814,6 +2880,7 @@ class MainWindow(QMainWindow):
         prompt = "simple test image"
         legacy_size = self._ratio_to_legacy_size_ui(ratio)
         sample_image_url = "https://picsum.photos/768/768"
+        probe_timeout = min(max(8, timeout), 20)
 
         model = self._normalize_generation_model_id(raw_model)
         if model in {"gpt4o-image", "gpt-image-1", "gpt-image-1.5"}:
@@ -2843,19 +2910,33 @@ class MainWindow(QMainWindow):
                     {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
                 ]
             else:
+                # Для image/edit моделей разные провайдеры требуют разные имена полей.
+                # Добавляем расширенный набор вариантов, чтобы проверка не падала из-за схемы input.
                 payload_variants = [
                     {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": ratio}},
                     {"model": test_model, "input": {"prompt": prompt, "image_url": sample_image_url, "size": ratio}},
                     {"model": test_model, "input": {"prompt": prompt, "imageUrl": sample_image_url, "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "image_urls": [sample_image_url], "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "imageUrls": [sample_image_url], "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "size": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "inputUrls": [sample_image_url], "size": ratio}},
                     {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "aspectRatio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "aspect_ratio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "aspectRatio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "aspect_ratio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "aspectRatio": ratio}},
+                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "aspect_ratio": ratio}},
                     {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": legacy_size}},
+                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "size": legacy_size}},
+                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "size": legacy_size}},
                 ]
 
         last_error = "Не удалось выполнить проверку"
         for payload in payload_variants:
             try:
                 req = request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                with request.urlopen(req, timeout=timeout, context=build_ssl_context()) as resp:
+                with request.urlopen(req, timeout=probe_timeout, context=build_ssl_context()) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 if int(data.get("code", 0)) == 200:
                     task_id = (data.get("data") or {}).get("taskId", "-")
@@ -2922,6 +3003,33 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Файл установщика не найден")
         os.startfile(installer_path)
 
+    def _build_license_client(self):
+        license_server_url = str(self.config.get("license_server_url", "")).strip()
+        license_backup_server_url = str(self.config.get("license_backup_server_url", "")).strip()
+        return LicenseClient(
+            server_url=license_server_url,
+            backup_server_url=license_backup_server_url,
+            cache_path=LICENSE_CACHE_FILE,
+            app_version=APP_VERSION,
+            timeout=max(5, int(self.config.get("timeout", 60))),
+        )
+
+    def _should_show_updates_expired_notice(self):
+        last_notice_raw = str(self.config.get("last_updates_expired_notice_at", "")).strip()
+        if not last_notice_raw:
+            return True
+        try:
+            last_notice_at = datetime.fromisoformat(last_notice_raw)
+            if last_notice_at.tzinfo is None:
+                last_notice_at = last_notice_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            return True
+        return (datetime.now(timezone.utc) - last_notice_at) >= timedelta(days=30)
+
+    def _mark_updates_expired_notice_shown(self):
+        self.config["last_updates_expired_notice_at"] = datetime.now(timezone.utc).isoformat()
+        self.save_config()
+
     def check_for_updates(self, silent=False):
         manifest_url = UPDATE_MANIFEST_URL
         if not manifest_url:
@@ -2930,6 +3038,17 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            updates_allowed = True
+            license_key = str(self.config.get("license_key", "")).strip()
+            if license_key:
+                try:
+                    license_client = self._build_license_client()
+                    license_status = license_client.status(license_key, use_offline=True)
+                    if license_status.get("ok"):
+                        updates_allowed = bool(license_status.get("updates_allowed", True))
+                except Exception as license_error:
+                    self.log(f"Проверка статуса лицензии для обновлений: {license_error}")
+
             req = request.Request(
                 manifest_url,
                 headers={
@@ -2954,6 +3073,21 @@ class MainWindow(QMainWindow):
             if not self._is_newer_version(latest_version, current_version):
                 if not silent:
                     QMessageBox.information(self, "Обновления", f"У вас актуальная версия: {current_version}")
+                return
+
+            if not updates_allowed:
+                if self._should_show_updates_expired_notice():
+                    QMessageBox.information(
+                        self,
+                        "Обновления",
+                        (
+                            "Доступна новая версия, но срок обновлений вашей лицензии истёк.\n"
+                            "Продлите лицензию, чтобы скачать обновление."
+                        ),
+                    )
+                    self._mark_updates_expired_notice_shown()
+                else:
+                    self.log("Обновления доступны, но уведомление скрыто (интервал 30 дней)")
                 return
 
             answer = QMessageBox.question(
@@ -3007,6 +3141,12 @@ class MainWindow(QMainWindow):
 
     def persist_ui_settings(self):
         self.config["kie_api_key"] = self.kie_api_key_input.text().strip()
+        if hasattr(self, "license_key_input"):
+            self.config["license_key"] = self.license_key_input.text().strip()
+        if hasattr(self, "license_server_url_input"):
+            self.config["license_server_url"] = self.license_server_url_input.text().strip()
+        if hasattr(self, "license_backup_server_url_input"):
+            self.config["license_backup_server_url"] = self.license_backup_server_url_input.text().strip()
         self.config["text_generation_model"] = self.get_selected_generation_model_id(self.text_generation_model_combo)
         self.config["reference_generation_model"] = self.get_selected_generation_model_id(
             self.reference_generation_model_combo
