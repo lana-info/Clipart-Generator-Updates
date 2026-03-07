@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from urllib import error as urlerror
 from urllib import request, parse
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageChops
 
 try:
     import certifi
@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
 )
 
 APP_VERSION = "0.2.3"
@@ -165,6 +166,9 @@ class WorkerThread(QThread):
 
         self.upscale = settings.get("upscale", True)
         self.remove_bg = settings.get("remove_bg", True)
+        self.trim_enabled = bool(settings.get("trim_enabled", False))
+        self.trim_mode = str(settings.get("trim_mode", "alpha") or "alpha")
+        self.trim_position = str(settings.get("trim_position", "post") or "post")
         self.kie_upscale_model = settings.get("kie_upscale_model", "topaz/upscale")
         self.kie_remove_bg_model = settings.get("kie_remove_bg_model", "recraft/remove-background")
         self.upscale_factor = int(settings.get("upscale_factor", 4) or 4)
@@ -221,14 +225,30 @@ class WorkerThread(QThread):
                 self._download_file(image_url, gen_path)
                 self.progress.emit(f"  Сгенерировано: {gen_path}")
 
+                source_path = gen_path
+                if process_generated and self.trim_enabled and self.trim_position == "pre":
+                    pretrim_path = os.path.join(raw_dir, f"gen_pretrim_{idx:03d}_{self.run_stamp}.png")
+                    source_path = self._trim_image_file(source_path, pretrim_path, "до апскейла")
+
                 final_url = image_url
                 if process_generated:
-                    uploaded_url = self._kie_upload_file(gen_path)
-                    self.progress.emit("  Загружено в KIE")
-                    final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "gen", gen_path)
+                    if self.upscale or self.remove_bg:
+                        uploaded_url = self._kie_upload_file(source_path)
+                        self.progress.emit("  Загружено в KIE")
+                        final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "gen", source_path)
+                    else:
+                        final_url = None
 
                 out_path = os.path.join(output_dir, f"result_{idx:03d}_{self.run_stamp}.png")
-                self._download_file(final_url, out_path)
+                if final_url:
+                    self._save_pipeline_result(final_url, out_path, raw_dir, idx, "gen")
+                elif process_generated:
+                    if self.trim_enabled and self.trim_position == "post":
+                        self._trim_image_file(source_path, out_path, "в конце")
+                    else:
+                        self._save_image_as_png(source_path, out_path)
+                else:
+                    self._save_image_as_png(gen_path, out_path)
                 self.progress.emit(f"  Итог сохранён: {out_path}")
                 done += 1
             except Exception as e:
@@ -256,7 +276,10 @@ class WorkerThread(QThread):
         self.progress.emit("Mode 2: Обработка существующих файлов через KIE")
         self.progress.emit(f"Рабочая папка: {self.work_dir}")
 
-        if not self.kie_api_key:
+        if not (self.upscale or self.remove_bg or self.trim_enabled):
+            raise ValueError("Включите хотя бы один этап: апскейл, удаление фона или trim")
+
+        if (self.upscale or self.remove_bg) and not self.kie_api_key:
             raise ValueError("Не указан KIE API Key")
 
         if not self.selected_files:
@@ -283,13 +306,29 @@ class WorkerThread(QThread):
                     self.progress.emit(f"  Файл не найден: {file_path}")
                     continue
 
-                uploaded_url = self._kie_upload_file(file_path)
-                self.progress.emit("  Загружено в KIE")
-                final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "file", file_path)
+                source_path = file_path
+                if self.trim_enabled and self.trim_position == "pre":
+                    pretrim_path = os.path.join(raw_dir, f"file_pretrim_{idx:03d}_{self.run_stamp}.png")
+                    source_path = self._trim_image_file(source_path, pretrim_path, "до апскейла")
+
+                if self.upscale or self.remove_bg:
+                    uploaded_url = self._kie_upload_file(source_path)
+                    self.progress.emit("  Загружено в KIE")
+                    final_url = self._run_kie_processing_pipeline(uploaded_url, raw_dir, idx, "file", source_path)
+                else:
+                    final_url = None
 
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 out_path = os.path.join(output_dir, f"{base}_processed_{self.run_stamp}.png")
-                self._download_file(final_url, out_path)
+
+                if final_url:
+                    self._save_pipeline_result(final_url, out_path, raw_dir, idx, "file")
+                else:
+                    if self.trim_enabled and self.trim_position == "post":
+                        self._trim_image_file(source_path, out_path, "в конце")
+                    else:
+                        self._save_image_as_png(source_path, out_path)
+
                 self.progress.emit(f"  Итог сохранён: {out_path}")
                 done += 1
             except Exception as e:
@@ -328,6 +367,65 @@ class WorkerThread(QThread):
             self.progress.emit(f"  Промежуточный без фона: {nobg_path}")
 
         return pipeline_url
+
+    def _save_pipeline_result(self, result_url, output_path, raw_dir, idx, prefix):
+        if self.trim_enabled and self.trim_position == "post":
+            pretrim_path = os.path.join(raw_dir, f"{prefix}_pretrim_{idx:03d}_{self.run_stamp}.png")
+            self._download_file(result_url, pretrim_path)
+            self._trim_image_file(pretrim_path, output_path, "в конце")
+            return
+        self._download_file(result_url, output_path)
+
+    def _save_image_as_png(self, source_path, output_path):
+        with Image.open(source_path) as img:
+            if img.mode not in {"RGB", "RGBA"}:
+                img = img.convert("RGBA")
+            img.save(output_path, format="PNG")
+
+    def _trim_image_file(self, source_path, output_path, stage_label):
+        with Image.open(source_path) as img:
+            bbox = self._detect_trim_bbox(img)
+            if not bbox:
+                self.progress.emit(f"  Trim {stage_label}: пустые края не найдены")
+                self._save_image_as_png(source_path, output_path)
+                return output_path
+
+            if bbox == (0, 0, img.width, img.height):
+                self.progress.emit(f"  Trim {stage_label}: обрезка не требуется")
+                self._save_image_as_png(source_path, output_path)
+                return output_path
+
+            cropped = img.crop(bbox)
+            if cropped.mode not in {"RGB", "RGBA"}:
+                cropped = cropped.convert("RGBA")
+            cropped.save(output_path, format="PNG")
+            self.progress.emit(f"  Trim {stage_label}: {img.width}x{img.height} → {cropped.width}x{cropped.height}")
+            return output_path
+
+    def _detect_trim_bbox(self, image):
+        mode = (self.trim_mode or "alpha").lower()
+        if mode == "white":
+            return self._detect_white_trim_bbox(image)
+        return self._detect_alpha_trim_bbox(image)
+
+    def _detect_alpha_trim_bbox(self, image):
+        rgba = image.convert("RGBA")
+        alpha = rgba.split()[-1]
+        return alpha.getbbox()
+
+    def _detect_white_trim_bbox(self, image):
+        threshold = 255
+        rgb = image.convert("RGB")
+        r, g, b = rgb.split()
+        mask_r = r.point(lambda v: 255 if v < threshold else 0)
+        mask_g = g.point(lambda v: 255 if v < threshold else 0)
+        mask_b = b.point(lambda v: 255 if v < threshold else 0)
+        mask = ImageChops.lighter(mask_r, ImageChops.lighter(mask_g, mask_b))
+
+        rgba = image.convert("RGBA")
+        alpha_non_empty = rgba.split()[-1].point(lambda v: 255 if v > 0 else 0)
+        mask = ImageChops.multiply(mask, alpha_non_empty)
+        return mask.getbbox()
 
     def _resolve_upscale_factor(self):
         model_name = (self.kie_upscale_model or "").strip()
@@ -1285,6 +1383,9 @@ class MainWindow(QMainWindow):
             "generation_size": "1:1",
             "remove_bg": True,
             "upscale": True,
+            "trim_enabled": False,
+            "trim_mode": "alpha",
+            "trim_position": "post",
             "upscale_factor": 4,
             "kie_upscale_model": "topaz/upscale",
             "kie_remove_bg_model": "recraft/remove-background",
@@ -1485,14 +1586,37 @@ class MainWindow(QMainWindow):
         process_tab_layout.addWidget(files_group)
 
         process_flags_group = QGroupBox("Параметры обработки")
-        process_flags_layout = QHBoxLayout()
+        process_flags_layout = QGridLayout()
+        process_flags_layout.setHorizontalSpacing(12)
+        process_flags_layout.setVerticalSpacing(8)
         self.chk_upscale = QCheckBox("Апскейл")
         self.chk_upscale.setChecked(self.config.get("upscale", True))
         self.chk_remove_bg = QCheckBox("Удаление фона")
         self.chk_remove_bg.setChecked(self.config.get("remove_bg", True))
-        process_flags_layout.addWidget(self.chk_upscale)
-        process_flags_layout.addWidget(self.chk_remove_bg)
-        process_flags_layout.addStretch()
+        self.chk_trim = QCheckBox("Trim (обрезка пустых краёв)")
+        self.chk_trim.setChecked(bool(self.config.get("trim_enabled", False)))
+        self.trim_mode_combo = QComboBox()
+        self.trim_mode_combo.addItem("Прозрачные края", "alpha")
+        self.trim_mode_combo.addItem("Белые края", "white")
+        trim_mode = str(self.config.get("trim_mode", "alpha") or "alpha")
+        trim_mode_index = self.trim_mode_combo.findData(trim_mode)
+        self.trim_mode_combo.setCurrentIndex(trim_mode_index if trim_mode_index >= 0 else 0)
+        self.trim_position_combo = QComboBox()
+        self.trim_position_combo.addItem("В конце", "post")
+        self.trim_position_combo.addItem("До апскейла", "pre")
+        self.trim_position_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.trim_position_combo.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        trim_position = str(self.config.get("trim_position", "post") or "post")
+        trim_position_index = self.trim_position_combo.findData(trim_position)
+        self.trim_position_combo.setCurrentIndex(trim_position_index if trim_position_index >= 0 else 0)
+
+        process_flags_layout.addWidget(self.chk_upscale, 0, 0)
+        process_flags_layout.addWidget(self.chk_remove_bg, 0, 1)
+        process_flags_layout.addWidget(self.chk_trim, 1, 0)
+        process_flags_layout.addWidget(self.trim_mode_combo, 1, 1)
+        process_flags_layout.addWidget(self.trim_position_combo, 1, 2)
+        process_flags_layout.setAlignment(self.trim_position_combo, Qt.AlignmentFlag.AlignLeft)
+        process_flags_layout.setColumnStretch(3, 1)
         process_flags_group.setLayout(process_flags_layout)
         process_tab_layout.addWidget(process_flags_group)
 
@@ -1630,6 +1754,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(log_group)
 
         self.refresh_upscale_factor_options()
+        self.update_trim_controls_state()
+        self.chk_trim.toggled.connect(self.update_trim_controls_state)
+        self.trim_mode_combo.currentIndexChanged.connect(self.update_trim_controls_state)
         self.on_mode_changed(True)
 
     def _normalize_generation_model_id(self, model_id):
@@ -1755,6 +1882,9 @@ class MainWindow(QMainWindow):
         self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.chk_upscale.toggled.connect(self.schedule_settings_save)
         self.chk_remove_bg.toggled.connect(self.schedule_settings_save)
+        self.chk_trim.toggled.connect(self.schedule_settings_save)
+        self.trim_mode_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.trim_position_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.kie_upscale_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.kie_upscale_model_combo.currentTextChanged.connect(self.on_upscale_model_changed)
         self.kie_remove_bg_model_combo.currentTextChanged.connect(self.schedule_settings_save)
@@ -1768,6 +1898,11 @@ class MainWindow(QMainWindow):
 
     def on_upscale_model_changed(self, *_):
         self.refresh_upscale_factor_options()
+
+    def update_trim_controls_state(self, *_):
+        trim_enabled = self.chk_trim.isChecked()
+        self.trim_mode_combo.setEnabled(trim_enabled)
+        self.trim_position_combo.setEnabled(trim_enabled)
 
     def refresh_upscale_factor_options(self):
         model_name = self.kie_upscale_model_combo.currentText().strip()
@@ -2271,7 +2406,8 @@ class MainWindow(QMainWindow):
         self.persist_ui_settings()
         current_api_key = self.config.get("kie_api_key", "").strip()
 
-        if not current_api_key:
+        needs_kie_api = not self.radio_run_process.isChecked() or self.chk_upscale.isChecked() or self.chk_remove_bg.isChecked()
+        if needs_kie_api and not current_api_key:
             QMessageBox.warning(self, "Ошибка", "Укажите KIE API Key на вкладке «Настройки»")
             return
 
@@ -2288,6 +2424,9 @@ class MainWindow(QMainWindow):
             mode = "mode2_process"
             if not self.selected_files:
                 QMessageBox.warning(self, "Ошибка", "Для режима обработки выберите файлы")
+                return
+            if not (self.chk_upscale.isChecked() or self.chk_remove_bg.isChecked() or self.chk_trim.isChecked()):
+                QMessageBox.warning(self, "Ошибка", "Включите хотя бы один этап: апскейл, удаление фона или trim")
                 return
         elif run_mode == "both":
             active_prompts = self.get_list_mode_prompts()
@@ -2671,6 +2810,9 @@ class MainWindow(QMainWindow):
         self.config["generation_size"] = self.generation_size_combo.currentText()
         self.config["remove_bg"] = self.chk_remove_bg.isChecked()
         self.config["upscale"] = self.chk_upscale.isChecked()
+        self.config["trim_enabled"] = self.chk_trim.isChecked()
+        self.config["trim_mode"] = str(self.trim_mode_combo.currentData() or "alpha")
+        self.config["trim_position"] = str(self.trim_position_combo.currentData() or "post")
         self.config["upscale_factor"] = int(self.upscale_factor_combo.currentText())
         self.config["kie_upscale_model"] = self.kie_upscale_model_combo.currentText()
         self.config["kie_remove_bg_model"] = self.kie_remove_bg_model_combo.currentText()
