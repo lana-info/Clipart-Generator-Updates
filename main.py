@@ -1728,6 +1728,10 @@ class MainWindow(QMainWindow):
         self.btn_check_model.setFixedSize(self.standard_button_width, self.standard_button_height)
         self.btn_check_model.setStyleSheet(self.compact_button_style)
         self.btn_check_model.clicked.connect(self.check_generation_model)
+        self.btn_check_balance = QPushButton("Проверить баланс")
+        self.btn_check_balance.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_check_balance.setStyleSheet(self.compact_button_style)
+        self.btn_check_balance.clicked.connect(self.check_kie_balance)
 
         settings_field_width = 220
         self.kie_api_key_input.setFixedSize(settings_field_width, 32)
@@ -1747,6 +1751,7 @@ class MainWindow(QMainWindow):
         kie_layout.addWidget(lbl_api_key, 0, 0)
         kie_layout.addWidget(self.kie_api_key_input, 0, 1)
         kie_layout.addWidget(self.btn_api_key_lock, 0, 2)
+        kie_layout.addWidget(self.btn_check_balance, 0, 3)
         kie_layout.addWidget(lbl_text_model, 1, 0)
         kie_layout.addWidget(self.text_generation_model_combo, 1, 1)
         kie_layout.addWidget(lbl_reference_model, 2, 0)
@@ -2690,6 +2695,115 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"Проверка моделей не пройдена: {e}")
             QMessageBox.warning(self, "Проверка моделей", f"Ошибка проверки: {e}")
+
+    def _extract_credit_value(self, payload):
+        priority_keys = [
+            "remainingCredits",
+            "remainingCredit",
+            "remaining_credits",
+            "remaining_credit",
+            "availableCredits",
+            "available_credits",
+            "credits",
+            "credit",
+            "balance",
+            "amount",
+            "totalCredits",
+            "total_credits",
+        ]
+
+        def _looks_like_number(value):
+            if isinstance(value, (int, float)):
+                return True
+            if isinstance(value, str):
+                text = value.strip().replace(",", ".")
+                if not text:
+                    return False
+                try:
+                    float(text)
+                    return True
+                except Exception:
+                    return False
+            return False
+
+        if isinstance(payload, dict):
+            for key in priority_keys:
+                if key in payload:
+                    return key, payload.get(key)
+
+            # Частый формат: data = число/строка с числом
+            if "data" in payload and _looks_like_number(payload.get("data")):
+                return "data", payload.get("data")
+
+            for value in payload.values():
+                found = self._extract_credit_value(value)
+                if found is not None:
+                    return found
+        elif isinstance(payload, list):
+            for item in payload:
+                found = self._extract_credit_value(item)
+                if found is not None:
+                    return found
+        elif _looks_like_number(payload):
+            return "value", payload
+        return None
+
+    def check_kie_balance(self):
+        api_key = self.kie_api_key_input.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "Ошибка", "Сначала укажите KIE API Key")
+            return
+
+        timeout = max(10, int(self.config.get("timeout", 60)))
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "x-api-key": api_key,
+            "Accept": "application/json",
+            "User-Agent": "ClipartGenerator/1.0 (+PyQt6)",
+        }
+
+        self.btn_check_balance.setEnabled(False)
+        self.btn_check_balance.setText("Проверка...")
+        try:
+            req = request.Request("https://api.kie.ai/api/v1/chat/credit", headers=headers, method="GET")
+            with request.urlopen(req, timeout=timeout, context=build_ssl_context()) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+
+            if int(result.get("code", 200)) not in {0, 200}:
+                raise RuntimeError(result.get("msg") or "KIE вернул ошибку при получении баланса")
+
+            extracted = self._extract_credit_value(result)
+            if extracted is None:
+                preview = json.dumps(result, ensure_ascii=False)[:1200]
+                self.log(f"Баланс KIE: поле с кредитами не найдено. Полный ответ: {preview}")
+                QMessageBox.information(
+                    self,
+                    "Баланс KIE",
+                    "Запрос выполнен, но поле баланса не распознано.\n"
+                    "Ответ сервера сохранён в логе (нижняя панель).",
+                )
+                return
+
+            key, value = extracted
+            self.log(f"Баланс KIE: {value} кредиты")
+            QMessageBox.information(self, "Баланс KIE", f"{value} кредиты")
+        except urlerror.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="ignore")
+            except Exception:
+                body = ""
+            msg = f"HTTP {e.code} {e.reason}"
+            if body:
+                msg = f"{msg}: {body[:400]}"
+            self.log(f"Проверка баланса не пройдена: {msg}")
+            QMessageBox.warning(self, "Баланс KIE", f"Проверка не пройдена\n{msg}")
+        except Exception as e:
+            self.log(f"Проверка баланса не пройдена: {e}")
+            QMessageBox.warning(self, "Баланс KIE", f"Ошибка проверки: {e}")
+        finally:
+            self.btn_check_balance.setEnabled(True)
+            self.btn_check_balance.setText("Проверить баланс")
 
     def _probe_model_with_ratio(self, raw_model, ratio, headers, timeout):
         prompt = "simple test image"
