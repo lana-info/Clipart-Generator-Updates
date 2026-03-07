@@ -157,7 +157,14 @@ class WorkerThread(QThread):
 
         self.kie_api_key = settings.get("kie_api_key", "").strip()
         self.kie_upload_path = settings.get("kie_upload_path", "clipart-generator")
-        self.generation_model = settings.get("generation_model", "gpt4o-image")
+        self.text_generation_model = settings.get(
+            "text_generation_model",
+            settings.get("generation_model", "gpt4o-image"),
+        )
+        self.reference_generation_model = settings.get(
+            "reference_generation_model",
+            "google/pro-image-to-image",
+        )
         self.generation_size = settings.get("generation_size", "1:1")
         self.timeout = max(10, int(settings.get("timeout", 60)))
         self.retries = max(0, int(settings.get("retries", 3)))
@@ -630,10 +637,10 @@ class WorkerThread(QThread):
         return urls
 
     def _kie_generate_image(self, prompt, references=None):
-        normalized_model = self._normalize_generation_model(self.generation_model)
+        reference_urls = self._resolve_reference_urls(references)
+        normalized_model = self._select_generation_model(reference_urls)
         model_meta = GENERATION_MODEL_META.get(normalized_model, {})
         model_type = model_meta.get("type", "text_to_image")
-        reference_urls = self._resolve_reference_urls(references)
 
         if model_type in {"image_to_image", "edit"} and not reference_urls:
             raise RuntimeError("Для выбранной модели нужен референс изображения")
@@ -643,6 +650,33 @@ class WorkerThread(QThread):
                 raise RuntimeError("Модель GPT‑4o Image не поддерживает референс в этом режиме")
             return self._kie_generate_4o_image(prompt)
         return self._kie_generate_generic_model(normalized_model, prompt, reference_urls=reference_urls)
+
+    def _select_generation_model(self, reference_urls):
+        has_references = bool(reference_urls)
+        preferred_model = self.reference_generation_model if has_references else self.text_generation_model
+        normalized = self._normalize_generation_model(preferred_model)
+        model_meta = GENERATION_MODEL_META.get(normalized, {})
+        model_type = model_meta.get("type")
+
+        if has_references and model_type in {"image_to_image", "edit"}:
+            return normalized
+        if not has_references and model_type == "text_to_image":
+            return normalized
+
+        fallback = self._default_generation_model("image_to_image" if has_references else "text_to_image")
+        self.progress.emit(
+            (
+                f"  Выбранная модель '{normalized}' не подходит для текущего режима. "
+                f"Используем '{fallback}'."
+            )
+        )
+        return fallback
+
+    def _default_generation_model(self, required_type):
+        for entry in GENERATION_MODELS:
+            if entry.get("type") == required_type:
+                return entry.get("id")
+        return "gpt4o-image"
 
     def _normalize_generation_model(self, model_name):
         model = (model_name or "").strip()
@@ -1379,6 +1413,8 @@ class MainWindow(QMainWindow):
             "update_manifest_url": UPDATE_MANIFEST_URL,
             "kie_api_key": "",
             "kie_upload_path": "clipart-generator",
+            "text_generation_model": "gpt4o-image",
+            "reference_generation_model": "google/pro-image-to-image",
             "generation_model": "gpt4o-image",
             "generation_size": "1:1",
             "remove_bg": True,
@@ -1404,6 +1440,32 @@ class MainWindow(QMainWindow):
             self.config = default_config
         # URL обновлений всегда фиксированный и не редактируется в UI.
         self.config["update_manifest_url"] = UPDATE_MANIFEST_URL
+
+        legacy_generation_model = self._normalize_generation_model_id(self.config.get("generation_model", "gpt4o-image"))
+        legacy_meta = GENERATION_MODEL_META.get(legacy_generation_model, {})
+        legacy_type = legacy_meta.get("type", "text_to_image")
+
+        text_model = self._normalize_generation_model_id(self.config.get("text_generation_model", ""))
+        text_meta = GENERATION_MODEL_META.get(text_model, {})
+        if text_meta.get("type") != "text_to_image":
+            if legacy_type == "text_to_image":
+                text_model = legacy_generation_model
+            else:
+                text_model = "gpt4o-image"
+        self.config["text_generation_model"] = text_model
+
+        reference_model = self._normalize_generation_model_id(self.config.get("reference_generation_model", ""))
+        reference_meta = GENERATION_MODEL_META.get(reference_model, {})
+        if reference_meta.get("type") not in {"image_to_image", "edit"}:
+            if legacy_type in {"image_to_image", "edit"}:
+                reference_model = legacy_generation_model
+            else:
+                reference_model = "google/pro-image-to-image"
+        self.config["reference_generation_model"] = reference_model
+
+        # Оставляем legacy-ключ для обратной совместимости.
+        self.config["generation_model"] = self.config["text_generation_model"]
+
         # Текущая версия приложения берётся из кода сборки, а не из пользовательского конфига.
         # Это предотвращает цикл обновлений, если в конфиге осталось старое значение.
         self.config["app_version"] = APP_VERSION
@@ -1637,9 +1699,23 @@ class MainWindow(QMainWindow):
         self.btn_api_key_lock.setToolTip("Ключ заблокирован")
         self.btn_api_key_lock.clicked.connect(self.toggle_api_key_lock)
 
-        self.generation_model_combo = QComboBox()
-        self.populate_generation_models()
-        self.set_generation_model_selection(self.config.get("generation_model", "gpt4o-image"))
+        self.text_generation_model_combo = QComboBox()
+        self.populate_generation_models(self.text_generation_model_combo, {"text_to_image"})
+        self.set_generation_model_selection(
+            self.text_generation_model_combo,
+            self.config.get("text_generation_model", "gpt4o-image"),
+            {"text_to_image"},
+            "gpt4o-image",
+        )
+
+        self.reference_generation_model_combo = QComboBox()
+        self.populate_generation_models(self.reference_generation_model_combo, {"image_to_image"})
+        self.set_generation_model_selection(
+            self.reference_generation_model_combo,
+            self.config.get("reference_generation_model", "google/pro-image-to-image"),
+            {"image_to_image"},
+            "google/pro-image-to-image",
+        )
 
         self.generation_size_combo = QComboBox()
         self.generation_size_combo.addItems(["1:1", "4:3", "3:4", "16:9", "9:16"])
@@ -1655,24 +1731,29 @@ class MainWindow(QMainWindow):
 
         settings_field_width = 220
         self.kie_api_key_input.setFixedSize(settings_field_width, 32)
-        self.generation_model_combo.setFixedSize(settings_field_width, 32)
+        self.text_generation_model_combo.setFixedSize(settings_field_width, 32)
+        self.reference_generation_model_combo.setFixedSize(settings_field_width, 32)
         self.generation_size_combo.setFixedSize(settings_field_width, 32)
 
         lbl_api_key = QLabel("KIE API Key:")
         lbl_api_key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lbl_gen_model = QLabel("Модель генерации:")
-        lbl_gen_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_text_model = QLabel("Для текстовых промптов:")
+        lbl_text_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_reference_model = QLabel("Для промптов с референсами:")
+        lbl_reference_model.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lbl_gen_size = QLabel("Соотношение:")
         lbl_gen_size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         kie_layout.addWidget(lbl_api_key, 0, 0)
         kie_layout.addWidget(self.kie_api_key_input, 0, 1)
         kie_layout.addWidget(self.btn_api_key_lock, 0, 2)
-        kie_layout.addWidget(lbl_gen_model, 1, 0)
-        kie_layout.addWidget(self.generation_model_combo, 1, 1)
-        kie_layout.addWidget(self.btn_check_model, 1, 2)
-        kie_layout.addWidget(lbl_gen_size, 2, 0)
-        kie_layout.addWidget(self.generation_size_combo, 2, 1)
+        kie_layout.addWidget(lbl_text_model, 1, 0)
+        kie_layout.addWidget(self.text_generation_model_combo, 1, 1)
+        kie_layout.addWidget(lbl_reference_model, 2, 0)
+        kie_layout.addWidget(self.reference_generation_model_combo, 2, 1)
+        kie_layout.addWidget(lbl_gen_size, 3, 0)
+        kie_layout.addWidget(self.generation_size_combo, 3, 1)
+        kie_layout.addWidget(self.btn_check_model, 3, 2)
         kie_group.setLayout(kie_layout)
         settings_tab_layout.addWidget(kie_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -1778,38 +1859,38 @@ class MainWindow(QMainWindow):
             "edit": "Edit",
         }.get(model_type or "", "Other")
 
-    def populate_generation_models(self):
-        self.generation_model_combo.clear()
+    def populate_generation_models(self, combo_box, allowed_types):
+        combo_box.clear()
         for entry in GENERATION_MODELS:
-            if entry.get("type") == "edit":
+            if entry.get("type") not in allowed_types:
                 continue
             group_title = self._model_type_title(entry.get("type"))
             label = f"[{group_title}] {entry.get('label', entry.get('id', ''))}"
-            self.generation_model_combo.addItem(label, entry.get("id"))
+            combo_box.addItem(label, entry.get("id"))
 
-    def set_generation_model_selection(self, model_id):
+    def set_generation_model_selection(self, combo_box, model_id, allowed_types, fallback_id):
         normalized = self._normalize_generation_model_id(model_id)
-        if (GENERATION_MODEL_META.get(normalized) or {}).get("type") == "edit":
-            normalized = "gpt4o-image"
-        idx = self.generation_model_combo.findData(normalized)
+        model_meta = GENERATION_MODEL_META.get(normalized, {})
+        if model_meta.get("type") not in allowed_types:
+            normalized = fallback_id
+
+        idx = combo_box.findData(normalized)
         if idx >= 0:
-            self.generation_model_combo.setCurrentIndex(idx)
+            combo_box.setCurrentIndex(idx)
             return
 
-        # Поддержка конфигов, где ранее мог сохраниться видимый label из комбобокса.
-        label_idx = self.generation_model_combo.findText(str(model_id or "").strip())
+        label_idx = combo_box.findText(str(model_id or "").strip())
         if label_idx >= 0:
-            self.generation_model_combo.setCurrentIndex(label_idx)
+            combo_box.setCurrentIndex(label_idx)
             return
 
-        custom_label = f"[Custom] {normalized}"
-        self.generation_model_combo.addItem(custom_label, normalized)
-        self.generation_model_combo.setCurrentIndex(self.generation_model_combo.count() - 1)
+        fallback_idx = combo_box.findData(fallback_id)
+        combo_box.setCurrentIndex(fallback_idx if fallback_idx >= 0 else 0)
 
-    def get_selected_generation_model_id(self):
-        model_id = self.generation_model_combo.currentData()
+    def get_selected_generation_model_id(self, combo_box):
+        model_id = combo_box.currentData()
         if not model_id:
-            model_id = self.generation_model_combo.currentText()
+            model_id = combo_box.currentText()
         return self._normalize_generation_model_id(model_id)
 
     def create_template_values_table(self, placeholder_prefix):
@@ -1878,7 +1959,8 @@ class MainWindow(QMainWindow):
     def setup_settings_autosave_connections(self):
         self.kie_api_key_input.textChanged.connect(self.schedule_settings_save)
         self.kie_api_key_input.textChanged.connect(self.on_api_key_changed)
-        self.generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.text_generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
+        self.reference_generation_model_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.generation_size_combo.currentTextChanged.connect(self.schedule_settings_save)
         self.chk_upscale.toggled.connect(self.schedule_settings_save)
         self.chk_remove_bg.toggled.connect(self.schedule_settings_save)
@@ -2416,10 +2498,6 @@ class MainWindow(QMainWindow):
         self.has_generated_output_in_run = False
 
         run_mode = self.config.get("run_mode", "generate_only")
-        selected_model_id = self.get_selected_generation_model_id()
-        selected_meta = GENERATION_MODEL_META.get(selected_model_id, {})
-        selected_type = selected_meta.get("type", "text_to_image")
-
         if run_mode == "process_only":
             mode = "mode2_process"
             if not self.selected_files:
@@ -2441,19 +2519,6 @@ class MainWindow(QMainWindow):
             if not active_prompts:
                 QMessageBox.warning(self, "Ошибка", "Добавьте хотя бы одну запись")
                 return
-
-            if selected_type in {"image_to_image", "edit"}:
-                has_missing_reference = any(
-                    (len(split_references(entry.get("references", []))) == 0)
-                    for entry in active_prompts
-                )
-                if has_missing_reference:
-                    QMessageBox.warning(
-                        self,
-                        "Ошибка",
-                        "Для моделей Image→Image/Edit у каждой записи должен быть референс",
-                    )
-                    return
 
             self.generated_prompts = active_prompts
             self.refresh_prompts_table()
@@ -2572,7 +2637,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Сначала укажите KIE API Key")
             return
 
-        raw_model = self.get_selected_generation_model_id()
+        text_model = self.get_selected_generation_model_id(self.text_generation_model_combo)
+        reference_model = self.get_selected_generation_model_id(self.reference_generation_model_combo)
         timeout = max(10, int(self.config.get("timeout", 60)))
         ratio = self.generation_size_combo.currentText().strip() or "1:1"
         headers = {
@@ -2582,18 +2648,34 @@ class MainWindow(QMainWindow):
         }
 
         try:
-            model_ok, model_msg, _ = self._probe_model_with_ratio(raw_model, "1:1", headers, timeout)
-            if not model_ok:
-                raise RuntimeError(f"Недоступна модель: {raw_model}. {model_msg}")
+            text_ok, text_msg, text_task_id = self._probe_model_with_ratio(text_model, "1:1", headers, timeout)
+            if not text_ok:
+                raise RuntimeError(f"Недоступна модель для текстовых промптов: {text_model}. {text_msg}")
 
-            ratio_ok, ratio_msg, task_id = self._probe_model_with_ratio(raw_model, ratio, headers, timeout)
+            ratio_ok, ratio_msg, _ = self._probe_model_with_ratio(text_model, ratio, headers, timeout)
             if not ratio_ok:
                 raise RuntimeError(
-                    f"Недоступно соотношение {ratio} для модели {raw_model}. {ratio_msg}"
+                    f"Недоступно соотношение {ratio} для модели {text_model}. {ratio_msg}"
                 )
 
-            self.log(f"Проверка модели '{raw_model}' успешна. Task ID: {task_id}")
-            QMessageBox.information(self, "Проверка модели", f"Модель доступна: {raw_model}")
+            ref_ok, ref_msg, ref_task_id = self._probe_model_with_ratio(reference_model, "1:1", headers, timeout)
+            if not ref_ok:
+                raise RuntimeError(f"Недоступна модель для промптов с референсами: {reference_model}. {ref_msg}")
+
+            ref_ratio_ok, ref_ratio_msg, _ = self._probe_model_with_ratio(reference_model, ratio, headers, timeout)
+            if not ref_ratio_ok:
+                raise RuntimeError(
+                    f"Недоступно соотношение {ratio} для модели {reference_model}. {ref_ratio_msg}"
+                )
+
+            self.log(
+                (
+                    "Проверка моделей успешна. "
+                    f"Text→Image: {text_model} (Task ID: {text_task_id}) | "
+                    f"Image→Image: {reference_model} (Task ID: {ref_task_id})"
+                )
+            )
+            QMessageBox.information(self, "Проверка моделей", "Обе модели доступны")
         except urlerror.HTTPError as e:
             body = ""
             try:
@@ -2603,11 +2685,11 @@ class MainWindow(QMainWindow):
             msg = f"HTTP {e.code} {e.reason}"
             if body:
                 msg = f"{msg}: {body[:400]}"
-            self.log(f"Проверка модели '{raw_model}' не пройдена: {msg}")
-            QMessageBox.warning(self, "Проверка модели", f"Модель недоступна: {raw_model}\n{msg}")
+            self.log(f"Проверка моделей не пройдена: {msg}")
+            QMessageBox.warning(self, "Проверка моделей", f"Проверка не пройдена\n{msg}")
         except Exception as e:
-            self.log(f"Проверка модели '{raw_model}' не пройдена: {e}")
-            QMessageBox.warning(self, "Проверка модели", f"Ошибка проверки: {e}")
+            self.log(f"Проверка моделей не пройдена: {e}")
+            QMessageBox.warning(self, "Проверка моделей", f"Ошибка проверки: {e}")
 
     def _probe_model_with_ratio(self, raw_model, ratio, headers, timeout):
         prompt = "simple test image"
@@ -2806,7 +2888,11 @@ class MainWindow(QMainWindow):
 
     def persist_ui_settings(self):
         self.config["kie_api_key"] = self.kie_api_key_input.text().strip()
-        self.config["generation_model"] = self.get_selected_generation_model_id()
+        self.config["text_generation_model"] = self.get_selected_generation_model_id(self.text_generation_model_combo)
+        self.config["reference_generation_model"] = self.get_selected_generation_model_id(
+            self.reference_generation_model_combo
+        )
+        self.config["generation_model"] = self.config["text_generation_model"]
         self.config["generation_size"] = self.generation_size_combo.currentText()
         self.config["remove_bg"] = self.chk_remove_bg.isChecked()
         self.config["upscale"] = self.chk_upscale.isChecked()

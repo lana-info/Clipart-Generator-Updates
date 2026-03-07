@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "D:\Projects\Clipart Generator\main.py", line 1081, in on_prompt_input_mode_changed
+    self.refresh_prompts_table()
+  File "D:\Projects\Clipart Generator\main.py", line 1161, in refresh_prompts_table
+    self.table.setRowCount(0)
+    ^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'table'. Did you mean: 'tabs'?
