@@ -56,7 +56,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
 
 GENERATION_MODELS = [
