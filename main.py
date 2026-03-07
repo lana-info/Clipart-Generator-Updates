@@ -1729,9 +1729,16 @@ class MainWindow(QMainWindow):
         self.btn_check_model.setStyleSheet(self.compact_button_style)
         self.btn_check_model.clicked.connect(self.check_generation_model)
         self.btn_check_balance = QPushButton("Проверить баланс")
-        self.btn_check_balance.setFixedSize(self.standard_button_width, self.standard_button_height)
+        self.btn_check_balance.setFixedSize(130, 32)
         self.btn_check_balance.setStyleSheet(self.compact_button_style)
         self.btn_check_balance.clicked.connect(self.check_kie_balance)
+
+        self.api_key_buttons_widget = QWidget()
+        self.api_key_buttons_layout = QHBoxLayout(self.api_key_buttons_widget)
+        self.api_key_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.api_key_buttons_layout.setSpacing(6)
+        self.api_key_buttons_layout.addWidget(self.btn_api_key_lock)
+        self.api_key_buttons_layout.addWidget(self.btn_check_balance)
 
         settings_field_width = 220
         self.kie_api_key_input.setFixedSize(settings_field_width, 32)
@@ -1750,8 +1757,7 @@ class MainWindow(QMainWindow):
 
         kie_layout.addWidget(lbl_api_key, 0, 0)
         kie_layout.addWidget(self.kie_api_key_input, 0, 1)
-        kie_layout.addWidget(self.btn_api_key_lock, 0, 2)
-        kie_layout.addWidget(self.btn_check_balance, 0, 3)
+        kie_layout.addWidget(self.api_key_buttons_widget, 0, 2)
         kie_layout.addWidget(lbl_text_model, 1, 0)
         kie_layout.addWidget(self.text_generation_model_combo, 1, 1)
         kie_layout.addWidget(lbl_reference_model, 2, 0)
@@ -1869,8 +1875,7 @@ class MainWindow(QMainWindow):
         for entry in GENERATION_MODELS:
             if entry.get("type") not in allowed_types:
                 continue
-            group_title = self._model_type_title(entry.get("type"))
-            label = f"[{group_title}] {entry.get('label', entry.get('id', ''))}"
+            label = entry.get("label", entry.get("id", ""))
             combo_box.addItem(label, entry.get("id"))
 
     def set_generation_model_selection(self, combo_box, model_id, allowed_types, fallback_id):
@@ -2785,8 +2790,8 @@ class MainWindow(QMainWindow):
                 return
 
             key, value = extracted
-            self.log(f"Баланс KIE: {value} кредиты")
-            QMessageBox.information(self, "Баланс KIE", f"{value} кредиты")
+            self.log(f"Баланс KIE: {value} кредитов")
+            QMessageBox.information(self, "Баланс KIE", f"{value} кредитов")
         except urlerror.HTTPError as e:
             body = ""
             try:
