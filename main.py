@@ -1058,9 +1058,11 @@ class CsvImportDialog(QDialog):
 
 
 class PromptReferencesDialog(QDialog):
-    def __init__(self, prompt_text, references, parent=None):
+    def __init__(self, prompt_text, references, parent=None, refs_only=False):
         super().__init__(parent)
-        self.setWindowTitle("Редактирование промпта и референсов")
+        self.refs_only = refs_only
+        self._source_prompt = str(prompt_text or "")
+        self.setWindowTitle("Референсы промпта" if refs_only else "Редактирование промпта и референсов")
         self.resize(760, 520)
 
         self.prompt_edit = QTextEdit()
@@ -1074,12 +1076,18 @@ class PromptReferencesDialog(QDialog):
         self.references_list.setSpacing(8)
         self.references_list.setIconSize(QSize(96, 96))
         self.references_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.references_list.setStyleSheet(
+            "QListWidget::item {border: 2px solid transparent; border-radius: 8px; padding: 4px;}"
+            "QListWidget::item:selected {border: 2px solid #14b8a6; background: rgba(20, 184, 166, 0.08);}"
+            "QListWidget::item:selected:!active {border: 2px solid #14b8a6; background: rgba(20, 184, 166, 0.08);}"
+        )
         for ref in split_references(references):
             self._append_reference_item(ref)
 
         main_layout = QVBoxLayout(self)
-        main_layout.addWidget(QLabel("Промпт:"))
-        main_layout.addWidget(self.prompt_edit)
+        if not self.refs_only:
+            main_layout.addWidget(QLabel("Промпт:"))
+            main_layout.addWidget(self.prompt_edit)
 
         refs_header = QHBoxLayout()
         refs_header.addWidget(QLabel("Референсы (до 5):"))
@@ -1100,7 +1108,7 @@ class PromptReferencesDialog(QDialog):
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         ok_btn = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
         if ok_btn:
-            ok_btn.setText("Сохранить")
+            ok_btn.setText("Применить" if self.refs_only else "Сохранить")
         main_layout.addWidget(self.button_box)
 
         self.btn_add_files.clicked.connect(self.add_files)
@@ -1164,7 +1172,7 @@ class PromptReferencesDialog(QDialog):
         self.references_list.clear()
 
     def get_data(self):
-        prompt = self.prompt_edit.toPlainText().strip()
+        prompt = self._source_prompt if self.refs_only else self.prompt_edit.toPlainText().strip()
         refs = [
             str(self.references_list.item(i).data(Qt.ItemDataRole.UserRole) or self.references_list.item(i).text()).strip()
             for i in range(self.references_list.count())
@@ -1440,7 +1448,7 @@ class MainWindow(QMainWindow):
         preview_group = QGroupBox("Список записей")
         preview_layout = QVBoxLayout()
         self.table = PromptTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Промпт", "Референсы", "🖼", ""])
+        self.table.setHorizontalHeaderLabels(["Промпт", "🖼", "", ""])
         self.table.verticalHeader().setVisible(True)
         self.table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -1450,7 +1458,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 220)
+        self.table.setColumnWidth(1, 52)
         self.table.setColumnWidth(2, 44)
         self.table.setColumnWidth(3, 44)
         self.table.setWordWrap(False)
@@ -1946,6 +1954,35 @@ class MainWindow(QMainWindow):
         self.refresh_prompts_table()
         self.save_prompts_storage()
 
+    def open_prompt_references(self, row_index):
+        if not (0 <= row_index < len(self.generated_prompts)):
+            return
+        entry = self._normalize_prompt_entry(self.generated_prompts[row_index])
+        self.generated_prompts[row_index] = entry
+
+        dialog = PromptReferencesDialog(entry.get("prompt", ""), entry.get("references", []), self, refs_only=True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        _, references = dialog.get_data()
+        entry["references"] = split_references(references)
+        self.generated_prompts[row_index] = entry
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
+
+    def pick_references_for_prompt_row(self, row_index):
+        if not (0 <= row_index < len(self.generated_prompts)):
+            return
+        files = self._pick_reference_files()
+        if not files:
+            return
+
+        entry = self._normalize_prompt_entry(self.generated_prompts[row_index])
+        entry["references"] = self._merge_references(entry.get("references", []), files)
+        self.generated_prompts[row_index] = entry
+        self.refresh_prompts_table()
+        self.save_prompts_storage()
+
     def on_prompt_item_double_clicked(self, item):
         if item.column() in {0, 1}:
             self.open_prompt_editor(item.row())
@@ -2010,11 +2047,10 @@ class MainWindow(QMainWindow):
 
     def get_list_mode_prompts(self):
         entries = []
-        for row in range(self.table.rowCount()):
-            prompt_item = self.table.item(row, 0)
-            references_item = self.table.item(row, 1)
-            prompt_text = (prompt_item.text() if prompt_item else "").strip()
-            references = split_references(references_item.text() if references_item else "")
+        for entry in self.generated_prompts:
+            normalized_entry = self._normalize_prompt_entry(entry)
+            prompt_text = str(normalized_entry.get("prompt", "")).strip()
+            references = split_references(normalized_entry.get("references", []))
             if prompt_text or references:
                 entries.append({"prompt": prompt_text, "references": references})
         return entries
@@ -2123,13 +2159,13 @@ class MainWindow(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
             prompt_text = str(normalized_entry.get("prompt", ""))
-            references_text = join_references(normalized_entry.get("references", []))
+            references_count = len(split_references(normalized_entry.get("references", [])))
+            references_text = str(references_count)
 
             prompt_item = QTableWidgetItem(prompt_text)
             references_item = QTableWidgetItem(references_text)
-            references_tooltip = self._build_references_tooltip(normalized_entry.get("references", []))
-            if references_tooltip:
-                references_item.setToolTip(references_tooltip)
+            references_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            references_item.setFlags(references_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 0, prompt_item)
             self.table.setItem(row, 1, references_item)
 
@@ -2139,9 +2175,9 @@ class MainWindow(QMainWindow):
             delete_btn.clicked.connect(lambda _, r=index: self.remove_prompt_row(r))
 
             edit_btn = QPushButton("🖼")
-            edit_btn.setToolTip("Открыть редактор промпта и референсов")
+            edit_btn.setToolTip("Выбрать файлы референсов")
             edit_btn.setMinimumHeight(28)
-            edit_btn.clicked.connect(lambda _, r=index: self.open_prompt_editor(r))
+            edit_btn.clicked.connect(lambda _, r=index: self.pick_references_for_prompt_row(r))
 
             self.table.setCellWidget(row, 2, edit_btn)
             self.table.setCellWidget(row, 3, delete_btn)
@@ -2167,23 +2203,12 @@ class MainWindow(QMainWindow):
     def on_prompt_item_changed(self, item):
         if self.is_updating_prompts_table:
             return
-        if item.column() not in {0, 1}:
+        if item.column() != 0:
             return
         row = item.row()
         if 0 <= row < len(self.generated_prompts):
             current_entry = self._normalize_prompt_entry(self.generated_prompts[row])
-            if item.column() == 0:
-                current_entry["prompt"] = item.text()
-            else:
-                refs = split_references(item.text())
-                if len(refs) > MAX_REFERENCES_PER_PROMPT:
-                    refs = refs[:MAX_REFERENCES_PER_PROMPT]
-                    QMessageBox.warning(
-                        self,
-                        "Ограничение референсов",
-                        f"Можно указать максимум {MAX_REFERENCES_PER_PROMPT} референсов на один промпт",
-                    )
-                current_entry["references"] = refs
+            current_entry["prompt"] = item.text()
             self.generated_prompts[row] = current_entry
             self.save_prompts_storage()
 
