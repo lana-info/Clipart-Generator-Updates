@@ -59,6 +59,14 @@ from PyQt6.QtWidgets import (
 
 APP_VERSION = "0.2.4"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/lana-info/Clipart-Generator-Updates/main/version.json"
+REFERENCE_MODEL_SHORTLIST = {
+    "flux-2/pro-image-to-image",
+    "flux-2/flex-image-to-image",
+    "gpt-image/1.5-image-to-image",
+    "qwen/image-to-image",
+    "grok-imagine/image-to-image",
+    "google/nano-banana-edit",
+}
 
 GENERATION_MODELS = [
     # Text -> Image
@@ -165,7 +173,7 @@ class WorkerThread(QThread):
         )
         self.reference_generation_model = settings.get(
             "reference_generation_model",
-            "google/pro-image-to-image",
+            "qwen/image-to-image",
         )
         self.generation_size = settings.get("generation_size", "1:1")
         self.timeout = max(10, int(settings.get("timeout", 60)))
@@ -675,6 +683,8 @@ class WorkerThread(QThread):
         return fallback
 
     def _default_generation_model(self, required_type):
+        if required_type == "image_to_image" and "qwen/image-to-image" in GENERATION_MODEL_META:
+            return "qwen/image-to-image"
         for entry in GENERATION_MODELS:
             if entry.get("type") == required_type:
                 return entry.get("id")
@@ -765,31 +775,49 @@ class WorkerThread(QThread):
             model_candidates = [model_name]
 
         if reference_urls:
-            primary_ref = reference_urls[0]
-            image_list = list(reference_urls)
-            input_variants = [
-                {"prompt": prompt, "image": primary_ref, "size": ratio},
-                {"prompt": prompt, "image_url": primary_ref, "size": ratio},
-                {"prompt": prompt, "imageUrl": primary_ref, "size": ratio},
-                {"prompt": prompt, "image": primary_ref, "aspectRatio": ratio},
-                {"prompt": prompt, "image": primary_ref, "aspect_ratio": ratio},
-                {"prompt": prompt, "image": primary_ref, "size": legacy_size},
-                {"prompt": prompt, "images": image_list, "size": ratio},
-                {"prompt": prompt, "image_urls": image_list, "size": ratio},
-                {"prompt": prompt, "imageUrls": image_list, "size": ratio},
-                {"prompt": prompt, "input_urls": image_list, "size": ratio},
-                {"prompt": prompt, "inputUrls": image_list, "size": ratio},
-                {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio},
-                {"prompt": prompt, "input_urls": image_list, "size": legacy_size},
-            ]
+            input_variants = self._build_reference_input_variants(model_name, prompt, reference_urls, ratio, legacy_size)
         else:
-            input_variants = [
-                {"prompt": prompt, "size": ratio},
-                {"prompt": prompt, "aspectRatio": ratio},
-                {"prompt": prompt, "aspect_ratio": ratio},
-                {"prompt": prompt, "size": legacy_size},
-                {"prompt": prompt, "image_size": legacy_size},
-            ]
+            if model_name == "gpt-image/1.5-text-to-image":
+                input_variants = [
+                    {"prompt": prompt, "aspect_ratio": ratio, "quality": "medium"},
+                    {"prompt": prompt, "aspect_ratio": ratio, "quality": "high"},
+                    {"prompt": prompt, "aspectRatio": ratio, "quality": "medium"},
+                    {"prompt": prompt, "size": ratio, "quality": "medium"},
+                    {"prompt": prompt, "size": legacy_size, "quality": "medium"},
+                ]
+            elif model_name in {"flux-2/pro-text-to-image", "flux-2/flex-text-to-image"}:
+                input_variants = [
+                    {"prompt": prompt, "aspect_ratio": ratio, "resolution": "2K"},
+                    {"prompt": prompt, "aspect_ratio": ratio, "resolution": "1K"},
+                    {"prompt": prompt, "aspectRatio": ratio, "resolution": "2K"},
+                    {"prompt": prompt, "aspectRatio": ratio, "resolution": "1K"},
+                    {"prompt": prompt, "aspect_ratio": ratio},
+                    {"prompt": prompt, "size": ratio},
+                ]
+            elif model_name == "google/nano-banana":
+                input_variants = [
+                    {"prompt": prompt, "image_size": ratio},
+                    {"prompt": prompt, "image_size": "auto"},
+                    {"prompt": prompt, "output_format": "png", "image_size": ratio},
+                    {"prompt": prompt, "output_format": "jpeg", "image_size": ratio},
+                    {"prompt": prompt, "size": ratio},
+                ]
+            elif model_name == "qwen/text-to-image":
+                input_variants = [
+                    {"prompt": prompt, "image_size": "square_hd"},
+                    {"prompt": prompt, "image_size": self._ratio_to_qwen_image_size(ratio)},
+                    {"prompt": prompt, "output_format": "png", "image_size": self._ratio_to_qwen_image_size(ratio)},
+                    {"prompt": prompt, "output_format": "jpeg", "image_size": self._ratio_to_qwen_image_size(ratio)},
+                    {"prompt": prompt, "size": ratio},
+                ]
+            else:
+                input_variants = [
+                    {"prompt": prompt, "size": ratio},
+                    {"prompt": prompt, "aspectRatio": ratio},
+                    {"prompt": prompt, "aspect_ratio": ratio},
+                    {"prompt": prompt, "size": legacy_size},
+                    {"prompt": prompt, "image_size": legacy_size},
+                ]
 
         prompt_variants = [prompt]
         if model_name == "z-image":
@@ -828,6 +856,150 @@ class WorkerThread(QThread):
         self.progress.emit(f"  Task ID: {fallback_task_id}")
         return self._kie_wait_result(fallback_task_id)
 
+    def _build_reference_input_variants(self, model_name, prompt, reference_urls, ratio, legacy_size):
+        primary_ref = reference_urls[0]
+        image_list = list(reference_urls)
+
+        common_variants = [
+            {"prompt": prompt, "image": primary_ref, "size": ratio},
+            {"prompt": prompt, "image_url": primary_ref, "size": ratio},
+            {"prompt": prompt, "imageUrl": primary_ref, "size": ratio},
+            {"prompt": prompt, "fileUrl": primary_ref, "size": ratio},
+            {"prompt": prompt, "inputImage": primary_ref, "size": ratio},
+            {"prompt": prompt, "images": image_list, "size": ratio},
+            {"prompt": prompt, "image_urls": image_list, "size": ratio},
+            {"prompt": prompt, "imageUrls": image_list, "size": ratio},
+            {"prompt": prompt, "input_urls": image_list, "size": ratio},
+            {"prompt": prompt, "inputUrls": image_list, "size": ratio},
+            {"prompt": prompt, "filesUrl": image_list, "size": ratio},
+            {"prompt": prompt, "image": primary_ref, "aspectRatio": ratio},
+            {"prompt": prompt, "image": primary_ref, "aspect_ratio": ratio},
+            {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio},
+            {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio},
+            {"prompt": prompt, "image": primary_ref, "size": legacy_size},
+            {"prompt": prompt, "input_urls": image_list, "size": legacy_size},
+            {"prompt": prompt, "filesUrl": image_list, "size": legacy_size},
+            {"prompt": prompt, "fileUrl": primary_ref, "size": legacy_size},
+        ]
+
+        prioritized_variants = {
+            "qwen/image-to-image": [
+                {"prompt": prompt, "image_url": primary_ref},
+                {"prompt": prompt, "image_url": primary_ref, "strength": 0.8},
+                {"prompt": prompt, "image_url": primary_ref, "output_format": "png"},
+                {"prompt": prompt, "image": primary_ref, "size": ratio},
+                {"prompt": prompt, "imageUrl": primary_ref, "size": ratio},
+            ],
+            "google/nano-banana-edit": [
+                {"prompt": prompt, "image_urls": image_list, "image_size": ratio},
+                {"prompt": prompt, "image_urls": image_list, "image_size": "auto"},
+                {"prompt": prompt, "image_urls": image_list, "output_format": "png", "image_size": ratio},
+                {"prompt": prompt, "images": image_list, "size": ratio},
+                {"prompt": prompt, "imageUrls": image_list, "size": ratio},
+            ],
+            "gpt-image/1.5-image-to-image": [
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "quality": "medium"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "quality": "high"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": "1:1", "quality": "medium"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio},
+                {"prompt": prompt, "inputUrls": image_list, "aspect_ratio": ratio, "quality": "medium"},
+                {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio, "quality": "medium"},
+            ],
+            "flux-2/pro-image-to-image": [
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "inputUrls": image_list, "aspect_ratio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "inputUrls": image_list, "aspect_ratio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": ratio},
+                {"prompt": prompt, "inputUrls": image_list, "size": ratio},
+                {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": legacy_size},
+            ],
+            "flux-2/flex-image-to-image": [
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "inputUrls": image_list, "aspect_ratio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "inputUrls": image_list, "aspect_ratio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "input_urls": image_list, "aspect_ratio": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": ratio},
+                {"prompt": prompt, "inputUrls": image_list, "size": ratio},
+                {"prompt": prompt, "input_urls": image_list, "aspectRatio": ratio},
+                {"prompt": prompt, "input_urls": image_list, "size": legacy_size},
+            ],
+            "grok-imagine/image-to-image": [
+                {"prompt": prompt, "image_urls": image_list, "size": ratio},
+                {"prompt": prompt, "images": image_list, "size": ratio},
+                {"prompt": prompt, "imageUrls": image_list, "size": ratio},
+            ],
+        }
+
+        variants = []
+        seen = set()
+        for payload in prioritized_variants.get(model_name, []) + common_variants:
+            key = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append(payload)
+        return variants
+
+    def _build_reference_probe_variants(self, model_name, prompt, sample_image_url, ratio, legacy_size):
+        reference_variants = self._build_reference_input_variants(
+            model_name,
+            prompt,
+            [sample_image_url],
+            ratio,
+            legacy_size,
+        )
+        return [{"model": model_name, "input": payload} for payload in reference_variants]
+
+    def _build_text_probe_variants(self, model_name, prompt, ratio, legacy_size):
+        if model_name == "gpt-image/1.5-text-to-image":
+            input_variants = [
+                {"prompt": prompt, "aspect_ratio": ratio, "quality": "medium"},
+                {"prompt": prompt, "aspect_ratio": ratio, "quality": "high"},
+                {"prompt": prompt, "aspectRatio": ratio, "quality": "medium"},
+                {"prompt": prompt, "size": ratio, "quality": "medium"},
+                {"prompt": prompt, "size": legacy_size, "quality": "medium"},
+            ]
+        elif model_name in {"flux-2/pro-text-to-image", "flux-2/flex-text-to-image"}:
+            input_variants = [
+                {"prompt": prompt, "aspect_ratio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "aspect_ratio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "aspectRatio": ratio, "resolution": "2K"},
+                {"prompt": prompt, "aspectRatio": ratio, "resolution": "1K"},
+                {"prompt": prompt, "aspect_ratio": ratio},
+                {"prompt": prompt, "size": ratio},
+            ]
+        elif model_name == "google/nano-banana":
+            input_variants = [
+                {"prompt": prompt, "image_size": ratio},
+                {"prompt": prompt, "image_size": "auto"},
+                {"prompt": prompt, "output_format": "png", "image_size": ratio},
+                {"prompt": prompt, "output_format": "jpeg", "image_size": ratio},
+                {"prompt": prompt, "size": ratio},
+            ]
+        elif model_name == "qwen/text-to-image":
+            qwen_size = self._ratio_to_qwen_image_size(ratio)
+            input_variants = [
+                {"prompt": prompt, "image_size": "square_hd"},
+                {"prompt": prompt, "image_size": qwen_size},
+                {"prompt": prompt, "output_format": "png", "image_size": qwen_size},
+                {"prompt": prompt, "output_format": "jpeg", "image_size": qwen_size},
+                {"prompt": prompt, "size": ratio},
+            ]
+        else:
+            input_variants = [
+                {"prompt": prompt, "size": ratio},
+                {"prompt": prompt, "aspectRatio": ratio},
+                {"prompt": prompt, "aspect_ratio": ratio},
+                {"prompt": prompt, "size": legacy_size},
+                {"prompt": prompt, "image_size": legacy_size},
+            ]
+
+        return [{"model": model_name, "input": payload} for payload in input_variants]
+
     def _normalize_ratio(self, value):
         raw = (value or "").strip()
         allowed = {"1:1", "4:3", "3:4", "16:9", "9:16"}
@@ -850,6 +1022,15 @@ class WorkerThread(QThread):
             "16:9": "1536x1024",
             "9:16": "1024x1536",
         }.get(ratio, "1024x1024")
+
+    def _ratio_to_qwen_image_size(self, ratio):
+        return {
+            "1:1": "square_hd",
+            "4:3": "landscape_4_3",
+            "3:4": "portrait_4_3",
+            "16:9": "landscape_16_9",
+            "9:16": "portrait_16_9",
+        }.get(ratio, "square_hd")
 
     def _kie_wait_4o_result(self, task_id):
         timeout_sec = self.generation_wait_timeout
@@ -1420,7 +1601,7 @@ class MainWindow(QMainWindow):
             "kie_api_key": "",
             "kie_upload_path": "clipart-generator",
             "text_generation_model": "gpt4o-image",
-            "reference_generation_model": "google/pro-image-to-image",
+            "reference_generation_model": "qwen/image-to-image",
             "generation_model": "gpt4o-image",
             "generation_size": "1:1",
             "remove_bg": True,
@@ -1465,12 +1646,11 @@ class MainWindow(QMainWindow):
         self.config["text_generation_model"] = text_model
 
         reference_model = self._normalize_generation_model_id(self.config.get("reference_generation_model", ""))
-        reference_meta = GENERATION_MODEL_META.get(reference_model, {})
-        if reference_meta.get("type") not in {"image_to_image", "edit"}:
-            if legacy_type in {"image_to_image", "edit"}:
+        if reference_model not in REFERENCE_MODEL_SHORTLIST:
+            if legacy_generation_model in REFERENCE_MODEL_SHORTLIST:
                 reference_model = legacy_generation_model
             else:
-                reference_model = "google/pro-image-to-image"
+                reference_model = "qwen/image-to-image"
         self.config["reference_generation_model"] = reference_model
 
         # Оставляем legacy-ключ для обратной совместимости.
@@ -1719,12 +1899,17 @@ class MainWindow(QMainWindow):
         )
 
         self.reference_generation_model_combo = QComboBox()
-        self.populate_generation_models(self.reference_generation_model_combo, {"image_to_image"})
+        self.populate_generation_models(
+            self.reference_generation_model_combo,
+            set(),
+            include_model_ids=REFERENCE_MODEL_SHORTLIST,
+        )
         self.set_generation_model_selection(
             self.reference_generation_model_combo,
-            self.config.get("reference_generation_model", "google/pro-image-to-image"),
-            {"image_to_image"},
-            "google/pro-image-to-image",
+            self.config.get("reference_generation_model", "qwen/image-to-image"),
+            set(),
+            "qwen/image-to-image",
+            include_model_ids=REFERENCE_MODEL_SHORTLIST,
         )
 
         self.generation_size_combo = QComboBox()
@@ -1772,6 +1957,31 @@ class MainWindow(QMainWindow):
         kie_layout.addWidget(self.generation_size_combo, 3, 1)
         kie_group.setLayout(kie_layout)
         settings_tab_layout.addWidget(kie_group, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        license_group = QGroupBox("Лицензия")
+        license_group.setMaximumWidth(720)
+        license_layout = QGridLayout()
+        license_layout.setHorizontalSpacing(6)
+        license_layout.setVerticalSpacing(6)
+
+        self.license_key_input = QLineEdit()
+        self.license_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.license_key_input.setText(self.config.get("license_key", ""))
+        self.license_key_input.setFixedSize(settings_field_width, 32)
+
+        self.btn_check_license = QPushButton("Проверить лицензию")
+        self.btn_check_license.setFixedSize(170, 32)
+        self.btn_check_license.setStyleSheet(self.compact_button_style)
+        self.btn_check_license.clicked.connect(self.check_license_key)
+
+        lbl_license_key = QLabel("Лицензионный ключ:")
+        lbl_license_key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        license_layout.addWidget(lbl_license_key, 0, 0)
+        license_layout.addWidget(self.license_key_input, 0, 1)
+        license_layout.addWidget(self.btn_check_license, 0, 2)
+        license_group.setLayout(license_layout)
+        settings_tab_layout.insertWidget(0, license_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         process_settings_group = QGroupBox("Обработка через KIE")
         process_settings_group.setMaximumWidth(720)
@@ -1875,18 +2085,22 @@ class MainWindow(QMainWindow):
             "edit": "Edit",
         }.get(model_type or "", "Other")
 
-    def populate_generation_models(self, combo_box, allowed_types):
+    def populate_generation_models(self, combo_box, allowed_types, include_model_ids=None):
         combo_box.clear()
+        extra_ids = set(include_model_ids or set())
         for entry in GENERATION_MODELS:
-            if entry.get("type") not in allowed_types:
+            model_id = entry.get("id")
+            model_type = entry.get("type")
+            if model_type not in allowed_types and model_id not in extra_ids:
                 continue
-            label = entry.get("label", entry.get("id", ""))
-            combo_box.addItem(label, entry.get("id"))
+            label = entry.get("label", model_id or "")
+            combo_box.addItem(label, model_id)
 
-    def set_generation_model_selection(self, combo_box, model_id, allowed_types, fallback_id):
+    def set_generation_model_selection(self, combo_box, model_id, allowed_types, fallback_id, include_model_ids=None):
         normalized = self._normalize_generation_model_id(model_id)
         model_meta = GENERATION_MODEL_META.get(normalized, {})
-        if model_meta.get("type") not in allowed_types:
+        extra_ids = set(include_model_ids or set())
+        if model_meta.get("type") not in allowed_types and normalized not in extra_ids:
             normalized = fallback_id
 
         idx = combo_box.findData(normalized)
@@ -2876,6 +3090,55 @@ class MainWindow(QMainWindow):
             self.btn_check_balance.setEnabled(True)
             self.btn_check_balance.setText("Проверить баланс")
 
+    def check_license_key(self):
+        license_key = self.license_key_input.text().strip()
+        if not license_key:
+            QMessageBox.warning(self, "Лицензия", "Введите лицензионный ключ")
+            return
+
+        try:
+            license_client = self._build_license_client()
+            if not (license_client.server_url or license_client.backup_server_url):
+                QMessageBox.warning(
+                    self,
+                    "Лицензия",
+                    "Не задан URL сервера лицензий в config.json",
+                )
+                return
+
+            result = license_client.status(license_key, use_offline=True)
+            activated_now = False
+            if not result.get("ok"):
+                activation_result = license_client.activate(license_key)
+                if activation_result.get("ok"):
+                    result = activation_result
+                    activated_now = True
+
+            if not result.get("ok"):
+                message = str(result.get("message") or "Ключ не прошёл проверку")
+                self.log(f"Лицензия не прошла проверку: {message}")
+                QMessageBox.warning(self, "Лицензия", message)
+                return
+
+            self.config["license_key"] = license_key
+            self.save_config()
+
+            expires_at = str(result.get("expires_at") or "-")
+            updates_until = str(result.get("updates_until") or "-")
+            updates_allowed = "Да" if result.get("updates_allowed", True) else "Нет"
+            state_text = "Лицензия активирована" if activated_now else "Лицензия подтверждена"
+            message = (
+                f"{state_text}\n"
+                f"Срок лицензии: {expires_at}\n"
+                f"Обновления до: {updates_until}\n"
+                f"Обновления доступны: {updates_allowed}"
+            )
+            self.log(f"Проверка лицензии успешна: {state_text}")
+            QMessageBox.information(self, "Лицензия", message)
+        except Exception as e:
+            self.log(f"Проверка лицензии не пройдена: {e}")
+            QMessageBox.warning(self, "Лицензия", f"Ошибка проверки: {e}")
+
     def _probe_model_with_ratio(self, raw_model, ratio, headers, timeout):
         prompt = "simple test image"
         legacy_size = self._ratio_to_legacy_size_ui(ratio)
@@ -2903,34 +3166,22 @@ class MainWindow(QMainWindow):
             url = "https://api.kie.ai/api/v1/jobs/createTask"
             test_model = model
             if model_type == "text_to_image":
-                payload_variants = [
-                    {"model": test_model, "input": {"prompt": prompt, "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "aspectRatio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "aspect_ratio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "size": legacy_size}},
-                ]
+                payload_variants = self._build_text_probe_variants(
+                    test_model,
+                    prompt,
+                    ratio,
+                    legacy_size,
+                )
             else:
-                # Для image/edit моделей разные провайдеры требуют разные имена полей.
-                # Добавляем расширенный набор вариантов, чтобы проверка не падала из-за схемы input.
-                payload_variants = [
-                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "image_url": sample_image_url, "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "imageUrl": sample_image_url, "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "image_urls": [sample_image_url], "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "imageUrls": [sample_image_url], "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "inputUrls": [sample_image_url], "size": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "aspectRatio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "aspect_ratio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "aspectRatio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "aspect_ratio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "aspectRatio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "aspect_ratio": ratio}},
-                    {"model": test_model, "input": {"prompt": prompt, "image": sample_image_url, "size": legacy_size}},
-                    {"model": test_model, "input": {"prompt": prompt, "images": [sample_image_url], "size": legacy_size}},
-                    {"model": test_model, "input": {"prompt": prompt, "input_urls": [sample_image_url], "size": legacy_size}},
-                ]
+                # Для image/edit моделей задаём приоритеты по конкретной модели,
+                # а затем уже используем общий fallback-набор схем.
+                payload_variants = self._build_reference_probe_variants(
+                    test_model,
+                    prompt,
+                    sample_image_url,
+                    ratio,
+                    legacy_size,
+                )
 
         last_error = "Не удалось выполнить проверку"
         for payload in payload_variants:
