@@ -43,11 +43,62 @@ uvicorn license_server:app --host 127.0.0.1 --port 8000
 
 Для боевого режима лучше использовать домен (например `https://license.yourdomain.com`).
 
+### Важно: защита админки сервера лицензий
+
+Теперь админ-эндпойнты сервера защищены секретным токеном:
+- `POST /admin/generate`
+- `GET /admin/list`
+
+На Railway нужно добавить переменную окружения:
+
+```text
+LICENSE_ADMIN_TOKEN=придумайте_сюда_длинный_секретный_токен
+```
+
+Пример хорошего токена:
+
+```text
+CG_ADMIN_9fK2xP7mQ4vL8sR1zN6tW3yH5uB0aD
+```
+
+Если токен не задан, админ-эндпойнты не будут работать.
+
+Передавать токен можно двумя способами:
+
+### Вариант A — через HTTP-заголовок
+
+Заголовок:
+
+```text
+X-Admin-Token: ваш_секретный_токен
+```
+
+### Вариант B — через query-параметр
+
+Пример:
+
+```text
+https://your-domain/admin/list?admin_token=ваш_секретный_токен
+```
+
+Но безопаснее использовать именно заголовок.
+
 ---
 
 ## 3) Как создать ключи для клиентов
 
 ### Вариант A — случайные ключи
+
+Если сервер запущен на Railway, для создания ключей через API не забудьте передать админ-токен.
+
+Пример `curl`:
+
+```powershell
+curl -X POST "https://your-domain/admin/generate" ^
+  -H "Content-Type: application/json" ^
+  -H "X-Admin-Token: ваш_секретный_токен" ^
+  -d "{\"count\":5,\"prefix\":\"CG\",\"mode\":\"random\",\"expires_days\":365,\"updates_days\":365,\"max_devices\":1,\"serial_start\":1}"
+```
 
 ```powershell
 python license_admin.py generate --count 50 --prefix CG --mode random --expires-days 365 --max-devices 1
@@ -68,6 +119,12 @@ python license_admin.py generate --count 20 --prefix CG --mode serial --serial-s
 
 ```powershell
 python license_admin.py list --limit 100
+```
+
+Если смотрите список через Railway API:
+
+```text
+GET https://your-domain/admin/list?admin_token=ваш_секретный_токен
 ```
 
 ### Сбросить активацию ключа (если клиент сменил ПК)

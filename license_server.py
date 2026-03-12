@@ -3,11 +3,12 @@ import sqlite3
 import string
 from datetime import datetime, timedelta, timezone
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 
 DB_PATH = os.environ.get("LICENSE_DB_PATH", "licenses.db")
+ADMIN_TOKEN = os.environ.get("LICENSE_ADMIN_TOKEN", "").strip()
 app = FastAPI(title="Clipart License Server")
 
 
@@ -140,6 +141,16 @@ def serial_key(prefix, index):
     return f"{prefix}-{index:06d}"
 
 
+def verify_admin_token(x_admin_token: str | None = None, admin_token: str | None = None):
+    expected_token = ADMIN_TOKEN
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Админ-токен не настроен на сервере")
+
+    provided_token = (x_admin_token or admin_token or "").strip()
+    if provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="Неверный админ-токен")
+
+
 @app.on_event("startup")
 def startup_event():
     init_db()
@@ -254,7 +265,12 @@ def deactivate(payload: LicensePayload):
 
 
 @app.post("/admin/generate")
-def admin_generate(payload: GeneratePayload):
+def admin_generate(
+    payload: GeneratePayload,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    admin_token: str | None = Query(default=None),
+):
+    verify_admin_token(x_admin_token, admin_token)
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -296,7 +312,12 @@ def admin_generate(payload: GeneratePayload):
 
 
 @app.get("/admin/list")
-def admin_list(limit: int = 50):
+def admin_list(
+    limit: int = 50,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    admin_token: str | None = Query(default=None),
+):
+    verify_admin_token(x_admin_token, admin_token)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
