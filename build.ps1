@@ -1,5 +1,5 @@
-param(
-    [string]$AppVersion = "0.2.4"
+﻿param(
+    [string]$AppVersion = "0.2.5"
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,3 +34,4 @@ $versionFile = Join-Path $releaseDir "VERSION.txt"
 "$AppVersion" | Out-File -FilePath $versionFile -Encoding utf8
 
 Write-Host "Done: dist\\Clipart Generator"
+

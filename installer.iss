@@ -1,6 +1,6 @@
-#define AppName "Clipart Generator"
+﻿#define AppName "Clipart Generator"
 #ifndef AppVersion
-  #define AppVersion "0.2.4"
+  #define AppVersion "0.2.5"
 #endif
 #define AppPublisher "Clipart Generator"
 #define AppExeName "Clipart Generator.exe"
@@ -25,7 +25,7 @@ ArchitecturesInstallIn64BitMode=x64
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Дополнительные задачи:"; Flags: unchecked
+Name: "desktopicon"; Description: "Ð¡Ð¾Ð·Ð´Ð°Ñ‚ÑŒ ÑÑ€Ð»Ñ‹Ðº Ð½Ð° Ñ€Ð°Ð±Ð¾Ñ‡ÐµÐ¼ ÑÑ‚Ð¾Ð»Ðµ"; GroupDescription: "Ð”Ð¾Ð¿Ð¾Ð»Ð½Ð¸Ñ‚ÐµÐ»ÑŒÐ½Ñ‹Ðµ Ð·Ð°Ð´Ð°Ñ‡Ð¸:"; Flags: unchecked
 
 [Files]
 Source: "dist\Clipart Generator\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
@@ -35,4 +35,5 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Запустить {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Ð—Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ {#AppName}"; Flags: nowait postinstall skipifsilent
+
