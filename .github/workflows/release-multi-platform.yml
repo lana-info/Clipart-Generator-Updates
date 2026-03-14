@@ -1,5 +1,8 @@
 name: Release Multi Platform
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -70,10 +73,21 @@ jobs:
           "WINDOWS_SETUP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload Windows artifacts
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: windows-${{ steps.version.outputs.app_version }}
           path: |
+            release/ClipartGenerator-Setup-${{ steps.version.outputs.app_version }}.exe
+            release/VERSION.txt
+
+      - name: Upload Windows setup to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.app_version }}
+          name: Clipart Generator v${{ steps.version.outputs.app_version }}
+          overwrite_files: true
+          files: |
             release/ClipartGenerator-Setup-${{ steps.version.outputs.app_version }}.exe
             release/VERSION.txt
 
@@ -166,8 +180,18 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "dist/Clipart Generator.app" "release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip"
 
       - name: Upload macOS artifacts
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: macos-${{ steps.version.outputs.app_version }}
           path: |
+            release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip
+
+      - name: Upload macOS zip to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.app_version }}
+          name: Clipart Generator v${{ steps.version.outputs.app_version }}
+          overwrite_files: true
+          files: |
             release/ClipartGenerator-macOS-${{ steps.version.outputs.app_version }}.zip
