@@ -1958,31 +1958,6 @@ class MainWindow(QMainWindow):
         kie_group.setLayout(kie_layout)
         settings_tab_layout.addWidget(kie_group, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        license_group = QGroupBox("Ð›Ð¸Ñ†ÐµÐ½Ð·Ð¸Ñ")
-        license_group.setMaximumWidth(720)
-        license_layout = QGridLayout()
-        license_layout.setHorizontalSpacing(6)
-        license_layout.setVerticalSpacing(6)
-
-        self.license_key_input = QLineEdit()
-        self.license_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.license_key_input.setText(self.config.get("license_key", ""))
-        self.license_key_input.setFixedSize(settings_field_width, 32)
-
-        self.btn_check_license = QPushButton("ÐŸÑ€Ð¾Ð²ÐµÑ€Ð¸Ñ‚ÑŒ Ð»Ð¸Ñ†ÐµÐ½Ð·Ð¸ÑŽ")
-        self.btn_check_license.setFixedSize(170, 32)
-        self.btn_check_license.setStyleSheet(self.compact_button_style)
-        self.btn_check_license.clicked.connect(self.check_license_key)
-
-        lbl_license_key = QLabel("Ð›Ð¸Ñ†ÐµÐ½Ð·Ð¸Ð¾Ð½Ð½Ñ‹Ð¹ ÐºÐ»ÑŽÑ‡:")
-        lbl_license_key.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        license_layout.addWidget(lbl_license_key, 0, 0)
-        license_layout.addWidget(self.license_key_input, 0, 1)
-        license_layout.addWidget(self.btn_check_license, 0, 2)
-        license_group.setLayout(license_layout)
-        settings_tab_layout.insertWidget(0, license_group, alignment=Qt.AlignmentFlag.AlignHCenter)
-
         process_settings_group = QGroupBox("ÐžÐ±Ñ€Ð°Ð±Ð¾Ñ‚ÐºÐ° Ñ‡ÐµÑ€ÐµÐ· KIE")
         process_settings_group.setMaximumWidth(720)
         process_settings_layout = QGridLayout()
@@ -3289,17 +3264,6 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            updates_allowed = True
-            license_key = str(self.config.get("license_key", "")).strip()
-            if license_key:
-                try:
-                    license_client = self._build_license_client()
-                    license_status = license_client.status(license_key, use_offline=True)
-                    if license_status.get("ok"):
-                        updates_allowed = bool(license_status.get("updates_allowed", True))
-                except Exception as license_error:
-                    self.log(f"ÐŸÑ€Ð¾Ð²ÐµÑ€ÐºÐ° ÑÑ‚Ð°Ñ‚ÑƒÑÐ° Ð»Ð¸Ñ†ÐµÐ½Ð·Ð¸Ð¸ Ð´Ð»Ñ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ð¹: {license_error}")
-
             req = request.Request(
                 manifest_url,
                 headers={
@@ -3326,19 +3290,13 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "ÐžÐ±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ñ", f"Ð£ Ð²Ð°Ñ Ð°ÐºÑ‚ÑƒÐ°Ð»ÑŒÐ½Ð°Ñ Ð²ÐµÑ€ÑÐ¸Ñ: {current_version}")
                 return
 
-            if not updates_allowed:
-                if self._should_show_updates_expired_notice():
-                    QMessageBox.information(
-                        self,
-                        "ÐžÐ±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ñ",
-                        (
-                            "Ð”Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð° Ð½Ð¾Ð²Ð°Ñ Ð²ÐµÑ€ÑÐ¸Ñ, Ð½Ð¾ ÑÑ€Ð¾Ðº Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ð¹ Ð²Ð°ÑˆÐµÐ¹ Ð»Ð¸Ñ†ÐµÐ½Ð·Ð¸Ð¸ Ð¸ÑÑ‚Ñ‘Ðº.\n"
-                            "ÐŸÑ€Ð¾Ð´Ð»Ð¸Ñ‚Ðµ Ð»Ð¸Ñ†ÐµÐ½Ð·Ð¸ÑŽ, Ñ‡Ñ‚Ð¾Ð±Ñ‹ ÑÐºÐ°Ñ‡Ð°Ñ‚ÑŒ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ."
-                        ),
-                    )
-                    self._mark_updates_expired_notice_shown()
-                else:
-                    self.log("ÐžÐ±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ñ Ð´Ð¾ÑÑ‚ÑƒÐ¿Ð½Ñ‹, Ð½Ð¾ ÑƒÐ²ÐµÐ´Ð¾Ð¼Ð»ÐµÐ½Ð¸Ðµ ÑÐºÑ€Ñ‹Ñ‚Ð¾ (Ð¸Ð½Ñ‚ÐµÑ€Ð²Ð°Ð» 30 Ð´Ð½ÐµÐ¹)")
+            # Ð’ silent-Ñ€ÐµÐ¶Ð¸Ð¼Ðµ Ð¾Ð±Ð½Ð¾Ð²Ð»ÑÐµÐ¼ÑÑ Ð±ÐµÐ· Ð´Ð¸Ð°Ð»Ð¾Ð³Ð¾Ð².
+            if silent:
+                self.log(f"Ð”Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ {latest_version}. Ð¡ÐºÐ°Ñ‡Ð¸Ð²Ð°Ð½Ð¸Ðµ...")
+                installer_path = self._download_update_installer(download_url, expected_sha256=checksum or None)
+                self.log(f"Ð£ÑÑ‚Ð°Ð½Ð¾Ð²Ñ‰Ð¸Ðº ÑÐºÐ°Ñ‡Ð°Ð½: {installer_path}")
+                self._run_downloaded_installer(installer_path)
+                QApplication.instance().quit()
                 return
 
             answer = QMessageBox.question(
@@ -3440,4 +3398,6 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
+
 
