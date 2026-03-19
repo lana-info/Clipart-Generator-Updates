@@ -1527,6 +1527,8 @@ class MainWindow(QMainWindow):
         self.restore_last_work_dir()
         self.load_saved_prompts()
         self.setup_settings_autosave_connections()
+        # Проверяем обновления при старте: без лишних сообщений,
+        # но если есть новая версия — спросим, скачивать или нет.
         QTimer.singleShot(1200, lambda: self.check_for_updates(silent=True))
 
     def load_saved_prompts(self):
@@ -3290,15 +3292,6 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "ÐžÐ±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ñ", f"Ð£ Ð²Ð°Ñ Ð°ÐºÑ‚ÑƒÐ°Ð»ÑŒÐ½Ð°Ñ Ð²ÐµÑ€ÑÐ¸Ñ: {current_version}")
                 return
 
-            # Ð’ silent-Ñ€ÐµÐ¶Ð¸Ð¼Ðµ Ð¾Ð±Ð½Ð¾Ð²Ð»ÑÐµÐ¼ÑÑ Ð±ÐµÐ· Ð´Ð¸Ð°Ð»Ð¾Ð³Ð¾Ð².
-            if silent:
-                self.log(f"Ð”Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ {latest_version}. Ð¡ÐºÐ°Ñ‡Ð¸Ð²Ð°Ð½Ð¸Ðµ...")
-                installer_path = self._download_update_installer(download_url, expected_sha256=checksum or None)
-                self.log(f"Ð£ÑÑ‚Ð°Ð½Ð¾Ð²Ñ‰Ð¸Ðº ÑÐºÐ°Ñ‡Ð°Ð½: {installer_path}")
-                self._run_downloaded_installer(installer_path)
-                QApplication.instance().quit()
-                return
-
             answer = QMessageBox.question(
                 self,
                 "Ð”Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ",
@@ -3398,6 +3391,7 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
 
 
 
