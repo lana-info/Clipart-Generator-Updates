@@ -31,9 +31,11 @@ doc_*.html
 
 # Резервные копии
 main_restored.py
+*.bak
 
 # Папка релизных артефактов
 release/*.exe
 release/*.msi
+
 
 
