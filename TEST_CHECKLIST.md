@@ -98,3 +98,22 @@
 
 ### Мини-вердикт
 - [ ] Если все пункты выше ок — сборку можно считать готовой к выдаче
+
+## 11) Инструкция по релизу и GitHub Actions
+
+1. **Сборка и публикация (через CI/скрипты)**
+   - Запустите `powershell -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion <новая версия>` на Windows-Runner или локально, чтобы собрать `.exe`.
+   - Запустите `powershell -ExecutionPolicy Bypass -File .\update_version.ps1 -AppVersion <новая версия>`, чтобы обновить `version.json` и получить `download_url`/`sha256`.
+   - Загружайте артефакты (`ClipartGenerator-Setup-<версия>.exe`, macOS-zip) в GitHub Release `v<версия>`; после загрузки убедитесь, что `version.json` содержит тот же `download_url`.
+
+2. **GitHub Actions (см. .github/workflows)**
+   - Создайте workflow, который запускает `python -m py_compile main.py` и smoke-тест (`python -c "import os; os.environ['QT_QPA_PLATFORM']='offscreen'; import main; app=main.QApplication([]); w=main.MainWindow(); print('SMOKE_OK')"`) при пуше в `main`.
+   - Добавьте шаг, который запускает `build.ps1` и `update_version.ps1` при создании тега `v<версия>` (можно использовать `actions/checkout` + `actions/setup-python`).
+   - После успешного выполнения workflow убедитесь, что `release/` содержит новый setup, и workflow автоматически обновит `version.json` (если используете `update_version.ps1`).
+
+3. **Ваши шаги перед релизом**
+   - Бери последних коммит с `main`, убедитесь, что `APP_VERSION` в `main.py` соответствует целевой версии.
+   - Попросите CI/Actions запустить рабочий workflow (или вручную запустите `build.ps1` + `update_version.ps1`).
+   - Создайте GitHub Release `v<версия>` и добавьте оба артефакта (Windows setup и macOS-zip).
+   - Проверьте, что `version.json` и GitHub Release совпадают по `download_url` и `sha256`.
+   - После публикации проверьте, что GitHub Releases и `_updates_repo_tmp/version.json` запушены, и приложение на рабочих машинах видит новое обновление.
